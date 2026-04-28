@@ -1,24 +1,5 @@
 ## AI 学术写作助手
 
-专业论文润色与语言优化系统
-<img width="2080" height="1361" alt="图片" src="https://github.com/user-attachments/assets/c11abdc9-4bc4-4d61-bea0-13071dba01cd" />
-
-<img width="2103" height="1337" alt="图片" src="https://github.com/user-attachments/assets/523da9c2-899d-4739-932e-84af881a1dfd" />
-
-
- ## 效果
- 
-示例一
-<img width="1785" height="654" alt="图片" src="https://github.com/user-attachments/assets/4c96dc66-aa43-432e-90a0-57f7d89dd0f2" />
-修改优化后
- <img width="1946" height="672" alt="图片" src="https://github.com/user-attachments/assets/a46f5d62-30ec-4930-b558-18bd24d0e86f" />
-例二
-<img width="1958" height="662" alt="图片" src="https://github.com/user-attachments/assets/de871360-c045-46ec-8e96-7b3c100af147" />
-修改优化后
-<img width="1772" height="665" alt="图片" src="https://github.com/user-attachments/assets/3fd2d052-d62e-41fd-8215-fbc375e0d0e5" />
-gptzero
-<img width="2224" height="547" alt="图片" src="https://github.com/user-attachments/assets/b5daf3cb-6e3f-401c-bdc2-a9a88dcbdb35" />
-
 ## 快速开始
 
 ### 环境要求
@@ -242,21 +223,6 @@ A: 这是因为 Gemini API 可能阻止流式请求。解决方法：
 5. 重新运行优化任务
 
 默认配置已经禁用了流式输出，如果仍然遇到此问题，请检查 `backend/.env` 文件中的 `USE_STREAMING` 设置是否为 `false`
-
-## License
-未经允许禁止商业使用
-
-Creative Commons (CC BY-NC-SA 4.0)
-
-[![Star History Chart](https://api.star-history.com/svg?repos=chi111i/BypassAIGC&type=Date)](https://star-history.com/#chi111i/BypassAIGC)
-
-
-
-
-
-
-
-
 
 
 
