@@ -118,8 +118,14 @@ async def download_result(
     except UnicodeEncodeError:
         ascii_fallback = "download.docx"
 
+    data = job.output_bytes
+
+    def stream_and_release():
+        yield data
+        job.output_bytes = None
+
     return StreamingResponse(
-        io.BytesIO(job.output_bytes),
+        stream_and_release(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={
             "Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_filename}",

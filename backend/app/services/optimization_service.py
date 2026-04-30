@@ -33,43 +33,40 @@ class OptimizationService:
         self.compression_service: Optional[AIService] = None
     
     def _init_ai_services(self):
-        """初始化AI服务
-        
-        改进的初始化逻辑：
-        1. 验证必需的配置项
-        2. 提供更详细的错误信息
-        3. 确保所有服务都正确初始化
-        """
+        """初始化AI服务（按需加载，节省内存）"""
         try:
-            # 润色服务
-            self.polish_service = AIService(
-                model=self.session_obj.polish_model or "gpt-4o",
-                api_key=self.session_obj.polish_api_key or settings.OPENAI_API_KEY,
-                base_url=self.session_obj.polish_base_url or settings.OPENAI_BASE_URL
-            )
+            mode = self.session_obj.processing_mode or "paper_polish"
 
-            # 增强服务
-            self.enhance_service = AIService(
-                model=self.session_obj.enhance_model or "gpt-4o",
-                api_key=self.session_obj.enhance_api_key or settings.OPENAI_API_KEY,
-                base_url=self.session_obj.enhance_base_url or settings.OPENAI_BASE_URL
-            )
-
-            # 感情文章润色服务
-            self.emotion_service = AIService(
-                model=self.session_obj.emotion_model or "gpt-4o",
-                api_key=self.session_obj.emotion_api_key or settings.OPENAI_API_KEY,
-                base_url=self.session_obj.emotion_base_url or settings.OPENAI_BASE_URL
-            )
-            
-            # 压缩服务
+            # 压缩服务（所有模式都需要）
             self.compression_service = AIService(
                 model=settings.COMPRESSION_MODEL,
                 api_key=settings.COMPRESSION_API_KEY or settings.OPENAI_API_KEY,
                 base_url=settings.COMPRESSION_BASE_URL or settings.OPENAI_BASE_URL
             )
-            
-            print(f"[INFO] 所有 AI 服务初始化成功，会话: {self.session_obj.session_id}")
+
+            # 按 processing_mode 按需创建
+            if mode in ("paper_polish", "paper_polish_enhance"):
+                self.polish_service = AIService(
+                    model=self.session_obj.polish_model or "gpt-4o",
+                    api_key=self.session_obj.polish_api_key or settings.OPENAI_API_KEY,
+                    base_url=self.session_obj.polish_base_url or settings.OPENAI_BASE_URL
+                )
+
+            if mode in ("paper_enhance", "paper_polish_enhance"):
+                self.enhance_service = AIService(
+                    model=self.session_obj.enhance_model or "gpt-4o",
+                    api_key=self.session_obj.enhance_api_key or settings.OPENAI_API_KEY,
+                    base_url=self.session_obj.enhance_base_url or settings.OPENAI_BASE_URL
+                )
+
+            if mode == "emotion_polish":
+                self.emotion_service = AIService(
+                    model=self.session_obj.emotion_model or "gpt-4o",
+                    api_key=self.session_obj.emotion_api_key or settings.OPENAI_API_KEY,
+                    base_url=self.session_obj.emotion_base_url or settings.OPENAI_BASE_URL
+                )
+
+            print(f"[INFO] AI 服务初始化成功 (mode={mode}), 会话: {self.session_obj.session_id}")
             
         except Exception as e:
             error_msg = f"AI 服务初始化失败: {str(e)}"
@@ -90,9 +87,11 @@ class OptimizationService:
             # 获取并发权限
             acquired = await concurrency_manager.acquire(self.session_obj.session_id)
             if not acquired:
+                if concurrency_manager.last_queue_full:
+                    raise Exception("服务器繁忙，请稍后再试")
                 self.session_obj.status = "queued"
                 self.db.commit()
-                
+
                 # 等待获取权限 - acquire 方法内部已包含等待逻辑
                 acquired = await concurrency_manager.acquire(self.session_obj.session_id)
                 if not acquired:

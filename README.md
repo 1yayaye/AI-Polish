@@ -38,6 +38,34 @@ cd backend
 python -m app.main --serve-static --open-browser
 ```
 
+### 一键启动脚本
+
+**Windows (PowerShell):**
+
+```powershell
+./start-dev.ps1              # 验证环境、构建前端、启动前后端
+./start-dev.ps1 -CheckOnly   # 仅验证环境
+```
+
+**Linux / macOS:**
+
+```bash
+./start-dev.sh                     # 验证环境、构建前端、启动前后端
+./start-dev.sh --check-only        # 仅验证环境
+./start-dev.sh --no-browser        # 不打开浏览器
+./start-dev.sh --skip-frontend-build  # 跳过前端构建
+```
+
+**Linux 生产部署:**
+
+```bash
+./start.sh                  # 自动构建前端（如需要），以 --serve-static 模式启动
+./start.sh --check-only     # 仅验证环境
+./start.sh --rebuild        # 强制重新构建前端
+```
+
+> 详细的 Linux 服务器部署指南（systemd + Nginx）请参考 `docs/deployment-512mb.md`。
+
 或通过环境变量：
 
 ```bash

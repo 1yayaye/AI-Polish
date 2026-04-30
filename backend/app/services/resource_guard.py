@@ -39,12 +39,16 @@ def get_resource_status() -> dict:
     minimum_mb = max(int(getattr(settings, "MIN_FREE_MEMORY_MB", 0) or 0), 0)
     memory_ok = True if available_mb is None else available_mb >= minimum_mb
 
+    from app.services.concurrency import concurrency_manager
+
     return {
         "deployment_profile": settings.DEPLOYMENT_PROFILE,
         "available_memory_mb": available_mb,
         "min_free_memory_mb": minimum_mb,
         "memory_ok": memory_ok,
         "max_concurrent_users": settings.MAX_CONCURRENT_USERS,
+        "active_sessions": concurrency_manager.get_active_count(),
+        "queue_length": len(concurrency_manager.queue),
         "word_formatter_max_concurrent_jobs": settings.WORD_FORMATTER_MAX_CONCURRENT_JOBS,
         "word_formatter_job_retention_hours": settings.WORD_FORMATTER_JOB_RETENTION_HOURS,
         "max_upload_file_size_mb": settings.MAX_UPLOAD_FILE_SIZE_MB,

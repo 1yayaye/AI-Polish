@@ -10,10 +10,12 @@ ACQUIRE_TIMEOUT = 3600  # 1小时
 class ConcurrencyManager:
     """并发控制管理器"""
     
-    def __init__(self, max_concurrent: int = None):
+    def __init__(self, max_concurrent: int = None, max_queue_size: int = 10):
         self.max_concurrent = max_concurrent or settings.MAX_CONCURRENT_USERS
+        self.max_queue_size = max_queue_size
         self.active_sessions: Dict[str, datetime] = {}
         self.queue: List[str] = []
+        self.last_queue_full: bool = False
         self._lock = asyncio.Lock()
         self._condition = asyncio.Condition(self._lock)  # 添加条件变量
     
@@ -27,16 +29,20 @@ class ConcurrencyManager:
         Returns:
             True if acquired, False if timed out or removed from queue
         """
+        self.last_queue_full = False
         async with self._condition:
             # 如果已经在活跃会话中,直接返回
             if session_id in self.active_sessions:
                 return True
-            
+
             if len(self.active_sessions) < self.max_concurrent:
                 self.active_sessions[session_id] = datetime.utcnow()
                 return True
 
             if session_id not in self.queue:
+                if len(self.queue) >= self.max_queue_size:
+                    self.last_queue_full = True
+                    return False
                 self.queue.append(session_id)
             
             # 等待被唤醒，设置超时防止无限等待

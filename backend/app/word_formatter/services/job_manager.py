@@ -394,6 +394,8 @@ class JobManager:
     async def start_cleanup_loop(self, interval_hours: int = 1):
         """Start periodic cleanup task."""
         async def _loop():
+            await asyncio.sleep(300)  # 首次 5 分钟后运行
+            await self.cleanup_old_jobs()
             while True:
                 await asyncio.sleep(interval_hours * 3600)
                 await self.cleanup_old_jobs()

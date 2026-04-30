@@ -94,6 +94,7 @@ class Settings(BaseSettings):
             "MAX_UPLOAD_FILE_SIZE_MB": 5,
             "MAX_TEXT_INPUT_CHARS": 50000,
             "UVICORN_ACCESS_LOG": False,
+            "HISTORY_COMPRESSION_THRESHOLD": 2000,
         }
         explicit_fields = set(self.model_fields_set)
         for field_name, default_value in low_memory_defaults.items():
@@ -147,7 +148,7 @@ def _auto_fix_default_credentials():
     updated_keys = set()
     new_lines = []
     for line in lines:
-        stripped = line.rstrip("\n")
+        stripped = line.rstrip("\r\n")
         if "=" in stripped and not stripped.strip().startswith("#"):
             key = stripped.split("=", 1)[0].strip()
             if key in updates:

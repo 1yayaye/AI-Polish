@@ -73,7 +73,7 @@ async def update_config(
     updated_keys = set()
     new_lines: List[str] = []
     for line in lines:
-        stripped = line.rstrip("\n")
+        stripped = line.rstrip("\r\n")
         if "=" in stripped and not stripped.strip().startswith("#"):
             key = stripped.split("=", 1)[0].strip()
             if key in updates:
