@@ -72,6 +72,11 @@ NPM_EXE="$(command -v npm || true)"
 [[ -n "$NPM_EXE" ]] || fail "npm not found. Install npm with Node.js."
 ok "Node and npm are available."
 
+# --- curl ---
+CURL_EXE="$(command -v curl || true)"
+[[ -n "$CURL_EXE" ]] || fail "curl not found. Install curl: yum install -y curl  (or apt install -y curl)"
+ok "curl is available."
+
 # --- .env 检查 ---
 step "Checking configuration..."
 [[ -f "$BACKEND_ENV" ]] || fail "backend/.env not found. Create it from backend/.env.example."
@@ -112,23 +117,30 @@ fi
 [[ -f "$FRONTEND_DIST/index.html" ]] || fail "frontend/dist/index.html not found. Run: cd frontend && npm run build"
 ok "Frontend dist is available."
 
-# --- 端口检查 ---
-check_port() {
+# --- 端口清理 ---
+free_port() {
     local port=$1
-    if command -v lsof &>/dev/null; then
-        if lsof -i :"$port" -sTCP:LISTEN &>/dev/null; then
-            fail "Port $port is already in use."
+    local killed=false
+    if command -v fuser &>/dev/null; then
+        if fuser "$port"/tcp &>/dev/null 2>&1; then
+            fuser -k "$port"/tcp 2>/dev/null && killed=true
         fi
-    elif command -v ss &>/dev/null; then
-        if ss -tlnp 2>/dev/null | grep -q ":$port "; then
-            fail "Port $port is already in use."
+    elif command -v lsof &>/dev/null; then
+        local pids
+        pids=$(lsof -t -i :"$port" -sTCP:LISTEN 2>/dev/null)
+        if [[ -n "$pids" ]]; then
+            kill -9 $pids 2>/dev/null && killed=true
         fi
+    fi
+    if [[ "$killed" == true ]]; then
+        echo -e "\033[33m[WARN]\033[0m Killed orphan process on port $port."
+        sleep 1
     fi
 }
 
-step "Checking ports..."
-check_port 9800
-check_port 5174
+step "Freeing ports..."
+free_port 9800
+free_port 5174
 ok "Ports 9800 and 5174 are free."
 
 if [[ "$CHECK_ONLY" == true ]]; then
@@ -143,8 +155,16 @@ FRONTEND_PID=""
 cleanup() {
     echo ""
     step "Shutting down..."
+    # 先发 SIGTERM，给进程优雅退出的机会
     [[ -n "$FRONTEND_PID" ]] && kill "$FRONTEND_PID" 2>/dev/null || true
     [[ -n "$BACKEND_PID" ]]  && kill "$BACKEND_PID" 2>/dev/null || true
+    # 等待 3 秒，然后强制 SIGKILL
+    sleep 3
+    [[ -n "$FRONTEND_PID" ]] && kill -9 "$FRONTEND_PID" 2>/dev/null || true
+    [[ -n "$BACKEND_PID" ]]  && kill -9 "$BACKEND_PID" 2>/dev/null || true
+    # 额外清理：杀掉所有子进程树
+    [[ -n "$BACKEND_PID" ]]  && pkill -P "$BACKEND_PID" 2>/dev/null || true
+    [[ -n "$FRONTEND_PID" ]] && pkill -P "$FRONTEND_PID" 2>/dev/null || true
     wait 2>/dev/null || true
     ok "All services stopped."
 }
@@ -179,8 +199,8 @@ wait_http() {
 }
 
 step "Waiting for services..."
-wait_http "Backend"  "http://localhost:9800/health" 45
-wait_http "Frontend" "http://localhost:5174"        60
+wait_http "Backend"  "http://127.0.0.1:9800/health" 60
+wait_http "Frontend" "http://127.0.0.1:5174"        60
 
 # --- 打开浏览器 ---
 if [[ "$NO_BROWSER" == false ]] && command -v xdg-open &>/dev/null; then

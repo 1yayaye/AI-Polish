@@ -1,10 +1,10 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 import os
 import argparse
 from typing import Optional
@@ -22,78 +22,61 @@ from app.database import SessionLocal
 from app.services.ai_service import get_default_polish_prompt, get_default_enhance_prompt
 
 
-# 响应缓存头中间件 - 优化浏览器缓存
-class CacheControlMiddleware(BaseHTTPMiddleware):
-    """添加缓存控制头，优化浏览器缓存"""
-
-    # 可缓存的静态资源路径
-    CACHEABLE_PATHS = {
-        "/api/prompts/system": 300,  # 系统提示词缓存5分钟
-        "/api/health/models": 60,    # 模型健康检查缓存1分钟
-        "/health": 30,               # 健康检查缓存30秒
-    }
-
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-
-        # 只对 GET 请求添加缓存头
-        if request.method == "GET":
-            path = request.url.path
-            # 检查是否是可缓存的路径
-            for cacheable_path, max_age in self.CACHEABLE_PATHS.items():
-                if path.endswith(cacheable_path):
-                    response.headers["Cache-Control"] = f"public, max-age={max_age}"
-                    break
-            else:
-                # 默认不缓存动态内容
-                if "/api/" in path:
-                    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-
-        return response
+# 可缓存的静态资源路径及缓存时间（秒）
+CACHEABLE_PATHS = {
+    "/api/prompts/system": 300,  # 系统提示词缓存5分钟
+    "/api/health/models": 60,    # 模型健康检查缓存1分钟
+    "/health": 30,               # 健康检查缓存30秒
+}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：替代已弃用的 @app.on_event"""
     # === 启动逻辑 ===
-    init_db()
+    # init_db 包含建表等同步操作，放到线程中避免阻塞事件循环
+    await asyncio.to_thread(init_db)
     job_manager = get_job_manager()
     await job_manager.start_cleanup_loop()
 
-    db = SessionLocal()
-    try:
-        polish_prompt = db.query(CustomPrompt).filter(
-            CustomPrompt.is_system.is_(True),
-            CustomPrompt.stage == "polish"
-        ).first()
+    def _seed_prompts():
+        """同步的数据库种子操作，在线程中执行"""
+        db = SessionLocal()
+        try:
+            polish_prompt = db.query(CustomPrompt).filter(
+                CustomPrompt.is_system.is_(True),
+                CustomPrompt.stage == "polish"
+            ).first()
 
-        if not polish_prompt:
-            polish_prompt = CustomPrompt(
-                name="默认润色提示词",
-                stage="polish",
-                content=get_default_polish_prompt(),
-                is_default=True,
-                is_system=True
-            )
-            db.add(polish_prompt)
+            if not polish_prompt:
+                polish_prompt = CustomPrompt(
+                    name="默认润色提示词",
+                    stage="polish",
+                    content=get_default_polish_prompt(),
+                    is_default=True,
+                    is_system=True
+                )
+                db.add(polish_prompt)
 
-        enhance_prompt = db.query(CustomPrompt).filter(
-            CustomPrompt.is_system.is_(True),
-            CustomPrompt.stage == "enhance"
-        ).first()
+            enhance_prompt = db.query(CustomPrompt).filter(
+                CustomPrompt.is_system.is_(True),
+                CustomPrompt.stage == "enhance"
+            ).first()
 
-        if not enhance_prompt:
-            enhance_prompt = CustomPrompt(
-                name="默认增强提示词",
-                stage="enhance",
-                content=get_default_enhance_prompt(),
-                is_default=True,
-                is_system=True
-            )
-            db.add(enhance_prompt)
+            if not enhance_prompt:
+                enhance_prompt = CustomPrompt(
+                    name="默认增强提示词",
+                    stage="enhance",
+                    content=get_default_enhance_prompt(),
+                    is_default=True,
+                    is_system=True
+                )
+                db.add(enhance_prompt)
 
-        db.commit()
-    finally:
-        db.close()
+            db.commit()
+        finally:
+            db.close()
+
+    await asyncio.to_thread(_seed_prompts)
 
     yield  # 应用运行期间
 
@@ -112,8 +95,21 @@ app = FastAPI(
 # 添加 Gzip 压缩中间件以减少响应体积
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# 添加缓存控制中间件
-app.add_middleware(CacheControlMiddleware)
+
+# 缓存控制中间件 - 使用函数式中间件避免 BaseHTTPMiddleware 的 TaskGroup 竞态问题
+@app.middleware("http")
+async def cache_control_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "GET":
+        path = request.url.path
+        for cacheable_path, max_age in CACHEABLE_PATHS.items():
+            if path.endswith(cacheable_path):
+                response.headers["Cache-Control"] = f"public, max-age={max_age}"
+                break
+        else:
+            if "/api/" in path:
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
 
 # CORS 配置
 _cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()] if settings.CORS_ORIGINS != "*" else ["*"]
