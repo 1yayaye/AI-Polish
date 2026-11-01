@@ -169,6 +169,7 @@ def _read_legacy(old_engine: Engine, tables: dict) -> dict:
         # 旧库布尔列历经多次手工加列，一律 coalesce 掉 NULL 再比较
         prompts = conn.execute(
             select(
+                prompts_t.c.id,
                 prompts_t.c.user_id,
                 prompts_t.c.name,
                 prompts_t.c.stage,
@@ -183,6 +184,7 @@ def _read_legacy(old_engine: Engine, tables: dict) -> dict:
         ).mappings().all()
         specs = conn.execute(
             select(
+                specs_t.c.id,
                 specs_t.c.user_id,
                 specs_t.c.name,
                 specs_t.c.description,
@@ -224,6 +226,16 @@ def _validate_snapshot(data: dict) -> None:
     for row in data["transactions"]:
         if row["user_id"] not in known_user_ids:
             raise MigrationError(f"旧账本第 {row['id']} 行指向不存在的用户 {row['user_id']}")
+
+    # custom_prompts.user_id 可空（全局公共模板，None 合法）；saved_specs.user_id
+    # 非空列。悬空引用一旦漏进写库阶段就是裸 AttributeError/KeyError，这里统一挡下
+    for table_name, rows in (("custom_prompts", data["prompts"]), ("saved_specs", data["specs"])):
+        for row in rows:
+            if row["user_id"] is not None and row["user_id"] not in known_user_ids:
+                raise MigrationError(
+                    f"旧库 {table_name} 第 {row['id']} 行（{row['name']}）"
+                    f"指向不存在的用户 {row['user_id']}"
+                )
 
 
 def _insert_ledger_entries(session: Session, transactions, user_id_map: dict[int, User]) -> int:
@@ -338,7 +350,7 @@ def migrate_legacy_db(old_engine: Engine, new_engine: Engine) -> MigrationReport
             for row in data["prompts"]:
                 session.add(
                     CustomPrompt(
-                        user_id=user_id_map.get(row["user_id"]).id if row["user_id"] is not None else None,
+                        user_id=user_id_map[row["user_id"]].id if row["user_id"] is not None else None,
                         name=row["name"],
                         stage=row["stage"],
                         content=row["content"],

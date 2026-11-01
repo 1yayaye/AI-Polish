@@ -359,6 +359,32 @@ def test_unknown_legacy_transaction_type_aborts(db_engine: Engine, legacy_engine
     assert _new_tables_count(db_engine, "ledger_entries") == 0
 
 
+@pytest.mark.parametrize("make_orphan_row", [_add_legacy_prompt, _add_legacy_spec])
+def test_orphan_prompt_or_spec_user_id_aborts(
+    db_engine: Engine, legacy_engine: Engine, make_orphan_row
+):
+    """custom_prompts / saved_specs 的 user_id 悬空（指向已删用户）：写库前
+    挡下，错误信息指到具体旧行，新库不留任何部分写入。"""
+    with legacy_engine.begin() as conn:
+        user_id = _add_legacy_user(conn, "legacy-card-ok", balance=100)
+        _add_legacy_tx(conn, user_id, "admin_adjustment", 100, 100)
+        if make_orphan_row is _add_legacy_prompt:
+            make_orphan_row(conn, user_id=999999, name="孤儿提示词")
+        else:
+            make_orphan_row(conn, user_id=999999, name="孤儿规格")
+
+    with pytest.raises(MigrationError) as exc_info:
+        migrate_legacy_db(legacy_engine, db_engine)
+    message = str(exc_info.value)
+    assert "custom_prompts" in message or "saved_specs" in message
+    assert "999999" in message  # 悬空 user_id 值
+    assert "孤儿提示词" in message or "孤儿规格" in message  # 旧行标识
+
+    assert _new_tables_count(db_engine, "users") == 0
+    assert _new_tables_count(db_engine, "custom_prompts") == 0
+    assert _new_tables_count(db_engine, "saved_specs") == 0
+
+
 def test_snapshot_change_is_rejected(db_engine: Engine, legacy_engine: Engine):
     """同一新库换一份旧库快照重跑：拒绝，交人工裁决（防误迁错库）。"""
     with legacy_engine.begin() as conn:
