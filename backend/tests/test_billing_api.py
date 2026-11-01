@@ -119,6 +119,71 @@ def test_admin_adjust_requires_admin(client: TestClient, make_user) -> None:
     assert response.status_code == 401
 
 
+# ---- 次数额度调整（spec #3 用户故事 8） ----
+
+
+def test_admin_usage_adjust_writes_ledger_and_user_sees_new_quota_immediately(
+    logged_in_client: TestClient, make_user, db_session_factory: sessionmaker
+) -> None:
+    user = make_user(card_key="card-usage-topup", usage_limit=10)
+
+    response = logged_in_client.post(
+        f"/api/admin/users/{user.id}/usage",
+        json={"delta": 5, "reason": "充值次数"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": user.id, "usage_limit": 15, "usage_remaining": 15}
+
+    # 用户端下一次读取即见新值
+    quota_response = logged_in_client.get(
+        "/api/me/quota", headers={"X-Card-Key": "card-usage-topup"}
+    )
+    assert quota_response.json()["usage_remaining"] == 15
+
+    (row,) = _ledger_rows(db_session_factory, user.id)
+    assert (row.kind, row.amount_fen, row.usage_after, row.reason) == (
+        "usage_adjust",
+        0,
+        15,
+        "充值次数",
+    )
+
+
+def test_admin_usage_adjust_below_used_conflicts_without_side_effects(
+    logged_in_client: TestClient, make_user, db_session_factory: sessionmaker
+) -> None:
+    user = make_user(card_key="card-usage-used", usage_limit=10, usage_used=8)
+
+    response = logged_in_client.post(
+        f"/api/admin/users/{user.id}/usage",
+        json={"delta": -5, "reason": "调到已用之下"},
+    )
+
+    assert response.status_code == 409
+    assert _ledger_rows(db_session_factory, user.id) == []
+
+
+def test_admin_usage_adjust_unknown_user_not_found(logged_in_client: TestClient) -> None:
+    response = logged_in_client.post(
+        "/api/admin/users/999/usage",
+        json={"delta": 5, "reason": "查无此人"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_admin_usage_adjust_requires_admin(client: TestClient, make_user) -> None:
+    user = make_user(card_key="card-usage-noauth")
+
+    response = client.post(
+        f"/api/admin/users/{user.id}/usage",
+        json={"delta": 5, "reason": "未登录"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_card_issuance_initial_quota_lands_in_ledger(
     logged_in_client: TestClient, db_session_factory: sessionmaker
 ) -> None:

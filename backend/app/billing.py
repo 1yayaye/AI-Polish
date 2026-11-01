@@ -16,8 +16,8 @@
   用户当前余额恒成立；balance_after_fen 为变动后余额（由 UPDATE 之后的
   同事务读回得到，SQLite 单写者串行保证该值属于本次变动）。
 - reason 必填：账本即业务监控（rewrite-plan §5），无原因的变动不存在。
-- task_id：charge/refund 必传（新流水一律可追溯到任务）；usage 两个操作
-  可空（Word Formatter 任务可能无任务行）。
+- task_id：charge/refund 必传（新流水一律可追溯到任务）；usage 三个操作
+  （预留/释放/额度调整）可空（Word Formatter 任务可能无任务行）。
 
 ## 退款幂等（崩溃重试不双倍退款）
 
@@ -44,6 +44,7 @@ KIND_REFUND = "refund"
 KIND_ADJUST = "adjust"
 KIND_USAGE_RESERVE = "usage_reserve"
 KIND_USAGE_RELEASE = "usage_release"
+KIND_USAGE_ADJUST = "usage_adjust"
 
 
 class BillingError(Exception):
@@ -339,5 +340,42 @@ def release_usage(
     _record_usage(
         session, user_id, kind=KIND_USAGE_RELEASE, usage_after=usage_after,
         task_id=task_id, reason=reason,
+    )
+    return usage_after
+
+
+def adjust_usage_limit(
+    session: Session, user_id: int, delta: int, *, reason: str
+) -> int:
+    """运营商调整次数额度上限（发卡后的充值/调低，GLOSSARY：用量上限）。
+
+    delta 为正即增加上限，为负即调低；条件守卫保证调整后的上限不低于
+    已用次数——调到已用之下等于没收用户已持有的权益。返回变动后剩余
+    次数。与余额轨的 adjust_balance 一样必写账本（kind=usage_adjust，
+    amount_fen=0），SUM(账本)==余额 不受影响。
+    """
+    if delta == 0:
+        raise ValueError("usage limit delta must be non-zero")
+    hit = (
+        session.execute(
+            update(User)
+            .where(User.id == user_id, User.usage_limit + delta >= User.usage_used)
+            .values(usage_limit=User.usage_limit + delta)
+        ).rowcount
+        == 1
+    )
+    if not hit:
+        # 只读回查区分两种失败（不写库），与 grant_initial_quota 同一纪律
+        exists = session.execute(select(User.id).where(User.id == user_id)).first()
+        if exists is None:
+            raise BillingError(f"次数额度调整失败：用户 {user_id} 不存在")
+        raise BillingError(f"次数额度调整失败：调整后的上限低于已用次数")
+    usage_limit, usage_used = session.execute(
+        select(User.usage_limit, User.usage_used).where(User.id == user_id)
+    ).one()
+    usage_after = usage_limit - usage_used
+    _record_usage(
+        session, user_id, kind=KIND_USAGE_ADJUST, usage_after=usage_after,
+        task_id=None, reason=reason,
     )
     return usage_after

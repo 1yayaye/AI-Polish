@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import billing
-from app.billing import InsufficientBalance
+from app.billing import BillingError, InsufficientBalance
 from app.config import settings
 from app.db import get_session
 from app.models import User, mask_card_key
@@ -210,3 +210,43 @@ def adjust_user_balance(
             status.HTTP_409_CONFLICT, detail="余额不足，无法完成本次扣减调整"
         ) from None
     return BalanceAdjustResponse(user_id=user_id, balance_fen=balance_fen)
+
+
+class UsageAdjustRequest(BaseModel):
+    """充值/调整次数额度：delta 为正即增加上限，为负即调低，不允许为 0。"""
+
+    delta: int
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class UsageAdjustResponse(BaseModel):
+    user_id: int
+    usage_limit: int
+    usage_remaining: int
+
+
+@router.post("/users/{user_id}/usage")
+def adjust_user_usage(
+    user_id: int,
+    body: UsageAdjustRequest,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> UsageAdjustResponse:
+    """运营商调整次数额度（spec #3 用户故事 8，Word Formatter 权益可控）。
+    全部变动经计费服务落账本（带原因），用户端额度接口下一次读取即见新值。"""
+    if body.delta == 0:
+        raise HTTPException(422, detail="delta 不允许为 0")
+    if session.get(User, user_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    try:
+        usage_remaining = billing.adjust_usage_limit(
+            session, user_id, body.delta, reason=body.reason
+        )
+    except BillingError:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="调整后的次数上限低于已用次数"
+        ) from None
+    user = session.get(User, user_id)
+    return UsageAdjustResponse(
+        user_id=user_id, usage_limit=user.usage_limit, usage_remaining=usage_remaining
+    )

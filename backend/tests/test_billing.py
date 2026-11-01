@@ -341,6 +341,74 @@ def test_reserve_rejects_insufficient_usage(
     assert (usage_limit, usage_used) == (30, 0)
 
 
+# ---- 次数轨：额度调整（管理端入口） ----
+
+
+def test_adjust_usage_limit_adds_and_reduces_with_ledger_row(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    session = db_session_factory()
+    try:
+        after_add = billing.adjust_usage_limit(session, funded_user.id, 10, reason="充值次数")
+        session.commit()
+        after_reduce = billing.adjust_usage_limit(session, funded_user.id, -5, reason="调低额度")
+        session.commit()
+    finally:
+        session.close()
+
+    assert (after_add, after_reduce) == (40, 35)
+    adjust_rows = [
+        r
+        for r in _ledger(db_session_factory, funded_user.id)
+        if r.kind == billing.KIND_USAGE_ADJUST
+    ]
+    assert [(r.amount_fen, r.usage_after, r.reason) for r in adjust_rows] == [
+        (0, 40, "充值次数"),
+        (0, 35, "调低额度"),
+    ]
+    assert _balance(db_session_factory, funded_user.id) == 12500  # 次数轨调整分毫不碰余额
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_adjust_usage_limit_rejects_below_used_without_side_effects(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    session = db_session_factory()
+    try:
+        billing.reserve_usage(session, funded_user.id, 3, task_id=None, reason="预留")
+        with pytest.raises(BillingError, match="低于已用次数"):
+            billing.adjust_usage_limit(session, funded_user.id, -28, reason="超调")
+        session.rollback()
+        with pytest.raises(ValueError):
+            billing.adjust_usage_limit(session, funded_user.id, 0, reason="零调整")
+        session.rollback()
+    finally:
+        session.close()
+
+    session = db_session_factory()
+    try:
+        usage_limit, usage_used = session.execute(
+            select(User.usage_limit, User.usage_used).where(User.id == funded_user.id)
+        ).one()
+    finally:
+        session.close()
+    assert (usage_limit, usage_used) == (30, 0)
+    assert (
+        [r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_USAGE_ADJUST]
+        == []
+    )
+
+
+def test_adjust_usage_limit_unknown_user_fails(db_session_factory: sessionmaker) -> None:
+    session = db_session_factory()
+    try:
+        with pytest.raises(BillingError, match="不存在"):
+            billing.adjust_usage_limit(session, 99999, 5, reason="查无此人")
+        session.rollback()
+    finally:
+        session.close()
+
+
 # ---- 入账与对账 ----
 
 

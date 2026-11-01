@@ -52,8 +52,8 @@ class LedgerEntry(Base):
     - amount_fen 为带符号增量（扣减为负、充值/退款为正），因此
       SUM(amount_fen) == 该用户当前余额 恒成立——对账与迁移硬校验
       （spec #3 用户故事 10）都依赖这一条；次数轨变动 amount_fen 为 0。
-    - usage_after 仅次数轨变动（usage_reserve/usage_release）非空，
-      记录变动后的剩余次数。
+    - usage_after 仅次数轨变动（usage_reserve/usage_release/usage_adjust）
+      非空，记录变动后的剩余次数。
     - task_id 无外键且可空：账本行要先于会话表存在，旧账本迁入不因缺
       旧会话而断裂（rewrite-plan §5）；新流水一律携带 task_id。
     - kind/amount/balance_after 的合法取值由 app.billing（计费服务）唯一
