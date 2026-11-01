@@ -49,3 +49,23 @@ def test_upgraded_schema_matches_models(db_url: str) -> None:
             assert "ux_ledger_refund_once_per_task" in indexes  # 退款幂等守卫
     finally:
         engine.dispose()
+
+
+def test_schema_has_model_snapshot_and_no_credential_columns(db_url: str) -> None:
+    """schema 级守卫（issue #18 验收 4，ADR-0005）：模型接入只来自 .env，
+    任何表不得出现 *_api_key / *_base_url 列；会话表只留只读 model_snapshot。"""
+    from app.db import create_db_engine
+
+    alembic.command.upgrade(_alembic_config(db_url), "head")
+    engine = create_db_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            for table in inspector.get_table_names():
+                columns = {c["name"] for c in inspector.get_columns(table)}
+                leaks = {c for c in columns if c.endswith("_api_key") or c.endswith("_base_url")}
+                assert not leaks, f"{table} 出现凭据列：{leaks}"
+            session_columns = {c["name"] for c in inspector.get_columns("optimization_sessions")}
+            assert "model_snapshot" in session_columns  # 客诉排查用的只读快照
+    finally:
+        engine.dispose()

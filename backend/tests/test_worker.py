@@ -30,6 +30,9 @@ from test_billing import assert_ledger_reconciles
 
 INITIAL_BALANCE_FEN = 5000
 
+# 恰好一万个非空白字符：三种模式的整万字定价样本（切分为 7 段，1500×6 + 1000）
+FULL_TEN_THOUSAND_TEXT = "字" * 10_000
+
 
 class ScriptedLLM:
     """脚本化假 LLM 接缝：按 (stage, seq) 返回预设输出。
@@ -284,6 +287,58 @@ def test_enhance_only_mode_processes_original_text(
     assert_ledger_reconciles(db_session_factory, user.id)
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_charge_fen"),
+    [
+        ("paper_polish", 300),  # 费率表：300 分/万字（app.optimization._PRICE_FEN_PER_10K）
+        ("paper_enhance", 300),
+        ("paper_polish_enhance", 500),  # 两阶段打包价低于单阶段之和
+    ],
+)
+def test_each_mode_completes_end_to_end_with_billing_matching_mode(
+    mode: str,
+    expected_charge_fen: int,
+    funded_user: Callable[..., User],
+    make_worker: Callable[..., worker_mod.PipelineWorker],
+    db_session_factory: sessionmaker,
+) -> None:
+    """三模式各自端到端跑通（假 LLM），计费与模式匹配（issue #18 验收 1）。
+
+    整万字文本：三种模式的预扣费按各自费率折算（300/300/500 分），完成
+    后资金保持扣减、无退款行；段落结果与变更记录按阶段归属落库。
+    """
+    user = funded_user()
+    session_id = _create_queued(db_session_factory, user, FULL_TEN_THOUSAND_TEXT, mode)
+    two_stage = mode == "paper_polish_enhance"
+    llm = ScriptedLLM(
+        {
+            **{("polish", seq): (lambda text: f"润色：{text}") for seq in range(7)},
+            **{("enhance", seq): (lambda text: f"增强：{text}") for seq in range(7)},
+        }
+    )
+    worker = make_worker(llm)
+
+    assert asyncio.run(worker.process_next()) is True
+
+    row = _session_row(db_session_factory, session_id)
+    assert row.status == "completed"
+    assert row.charged_fen == expected_charge_fen  # 计费与模式匹配
+    assert row.model_snapshot == "scripted-model"  # 只读快照，无 key/base_url
+
+    segments = _segments(db_session_factory, session_id)
+    stages = ["polish", "enhance"] if two_stage else ["enhance" if mode == "paper_enhance" else "polish"]
+    assert [(s.stage, s.seq, s.status) for s in segments] == [
+        (stage, seq, "completed") for stage in stages for seq in range(7)
+    ]
+    # 变更记录按阶段归属：单阶段每段一行，两阶段每段两行（润色 + 增强）
+    assert len(_change_logs(db_session_factory, session_id)) == 7 * len(stages)
+
+    # 资金：成功不退款，余额恰好减少该模式的定价；账本对账成立
+    assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN - expected_charge_fen
+    assert _refund_rows(db_session_factory, session_id) == []
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
 def test_no_queued_session_is_reported_idle(
     make_worker: Callable[..., worker_mod.PipelineWorker],
 ) -> None:
@@ -377,6 +432,53 @@ def test_failure_stops_processing_remaining_segments(
     assert by_seq[1].status == "failed"
     assert len(llm.calls) == 2  # 失败后不再继续后续段落
     assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_enhance_stage_failure_after_partial_completion_refunds_full_charge(
+    funded_user: Callable[..., User],
+    make_worker: Callable[..., worker_mod.PipelineWorker],
+    db_session_factory: sessionmaker,
+) -> None:
+    """两阶段中途失败的退款语义（issue #18 验收 5）：部分完成时资金状态明确。
+
+    润色阶段全部完成、增强阶段第一段失败：会话 failed，已完成的润色段
+    结果原样保留（部分完成的工作不回滚、可审计），失败增强段可见、未跑
+    段落保持 pending；资金全额退款——两阶段是一个计费整体，不按阶段拆退，
+    退款金额恒等于 charged_fen（#13 守卫），账本对账成立。
+    """
+    user = funded_user()
+    session_id = _create_queued(
+        db_session_factory, user, "第一段原文。\n\n第二段原文。", "paper_polish_enhance"
+    )
+    llm = ScriptedLLM(
+        {
+            ("polish", 0): "润色0",
+            ("polish", 1): "润色1",
+            ("enhance", 0): LLMContentError("增强调用被拒绝（HTTP 401）：bad key"),
+        }
+    )
+    worker = make_worker(llm)
+
+    assert asyncio.run(worker.process_next()) is True
+
+    row = _session_row(db_session_factory, session_id)
+    assert row.status == "failed"
+    segments = _segments(db_session_factory, session_id)  # 润色段在前
+    assert [(s.stage, s.seq, s.status) for s in segments] == [
+        ("polish", 0, "completed"),
+        ("polish", 1, "completed"),
+        ("enhance", 0, "failed"),
+        ("enhance", 1, "pending"),
+    ]
+    # 部分完成的润色产物保留（变更记录不回滚），失败段的输入仍是润色产物
+    assert [s.result_text for s in segments[:2]] == ["润色0", "润色1"]
+    assert segments[2].source_text == "润色0"
+
+    # 资金：全额退款到账（余额回到预扣前），恰好一条等额 refund 行
+    assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN
+    refunds = _refund_rows(db_session_factory, session_id)
+    assert len(refunds) == 1 and refunds[0].amount_fen == row.charged_fen
     assert_ledger_reconciles(db_session_factory, user.id)
 
 
