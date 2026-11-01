@@ -16,9 +16,11 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
   条件 UPDATE 置会话 failed，同事务走 :func:`billing.refund` 自动退款
   （金额取 charged_fen；幂等与金额守卫由计费服务拥有）。条件 UPDATE 输给
   并发取消（对方已置 cancelled 并退款）时不再退。
-- :class:`billing.RefundConflict` 与其余一切异常（编程错误、数据库故障）
-  直接冒泡终止 Worker：响亮失败优于吞掉，崩溃后会话停在中途状态、预扣
-  资金原样在账，由僵尸恢复协议接管（app.recovery，本模块不实现恢复）。
+- :class:`billing.RefundConflict` 与其余一切异常（编程错误、数据库故障）：
+  单轮响亮失败——ERROR 级日志带栈显性记录（不吞），中断会话留在 running，
+  其兜底退款与续跑语义由僵尸恢复协议唯一拥有（app.recovery 巡检）；常驻
+  循环本身不死（与 :func:`app.recovery.patrol_forever` 同一惯例），后续
+  queued 会话照常拉取，不因单轮故障永久停摆。
 
 LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方法 +
 ``model_name``），生产接 :class:`app.llm.PolishLLMClient`，测试接脚本化假
@@ -31,6 +33,7 @@ LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方�
 
 import asyncio
 import functools
+import logging
 from collections.abc import Callable
 from typing import Protocol
 
@@ -41,6 +44,8 @@ from app import billing, optimization, seeds, stream
 from app.db import short_tx
 from app.llm import LLMError
 from app.models import OptimizationSession, Segment, SegmentChangeLog
+
+logger = logging.getLogger(__name__)
 
 
 class SegmentPolisher(Protocol):
@@ -80,9 +85,24 @@ class PipelineWorker:
         self._prompt_for = prompt_for or _system_prompt_for
 
     async def run_forever(self) -> None:
-        """常驻循环：拉到会话立刻处理下一个，空转按间隔轮询数据库。"""
+        """常驻循环：拉到会话立刻处理下一个，空转按间隔轮询数据库。
+
+        看门狗不死（与 :func:`app.recovery.patrol_forever` 同一惯例）：单轮
+        处理的任何异常 ERROR 级记日志后按轮询间隔退避、继续下一轮；中断的
+        会话留在 running，兜底退款归僵尸巡检协议（app.recovery）。取消随
+        asyncio 惯例冒泡（lifespan 关停负责 gather）。
+        """
         while True:
-            if not await self.process_next():
+            try:
+                if not await self.process_next():
+                    await asyncio.sleep(self._poll_interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Worker 单轮处理失败：中断会话留在 running 由僵尸巡检兜底，"
+                    "退避后继续服务队列"
+                )
                 await asyncio.sleep(self._poll_interval)
 
     async def process_next(self) -> bool:

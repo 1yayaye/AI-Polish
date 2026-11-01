@@ -7,6 +7,7 @@
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable
 from datetime import datetime
 
@@ -561,6 +562,61 @@ def test_worker_crash_midway_keeps_running_state_and_holds_funds(
     # 资金不丢：预扣费原样在账，无退款（退款归 T5 兜底协议）
     assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN - 1
     assert _refund_rows(db_session_factory, session_id) == []
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_run_forever_survives_unexpected_error_and_keeps_serving_queue(
+    funded_user: Callable[..., User],
+    make_worker: Callable[..., worker_mod.PipelineWorker],
+    db_session_factory: sessionmaker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """非 LLMError 异常不终止常驻循环：ERROR 级响亮记录后继续拉取后续会话。
+
+    中断会话留在 running（兜底退款归僵尸巡检协议 app.recovery），循环不死，
+    queued 会话不因此孤儿化。
+    """
+    user = funded_user()
+    crashed_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    next_id = _create_queued(db_session_factory, user, "第二段。", "paper_polish")
+
+    script: dict[tuple[str, int], object] = {("polish", 0): RuntimeError("数据库故障")}
+    calls = {"n": 0}
+
+    def on_call(stage: str, seq: int, _text: str) -> None:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            script[(stage, seq)] = "润色"  # 首轮炸掉后恢复正常
+
+    llm = ScriptedLLM(script, on_call=on_call)
+    worker = make_worker(llm, poll_interval_seconds=0.01)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(worker.run_forever())
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
+            while _session_row(db_session_factory, next_id).status != "completed":
+                assert loop.time() < deadline, "循环未在异常后继续服务队列"
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    with caplog.at_level(logging.ERROR, logger="app.worker"):
+        asyncio.run(scenario())
+
+    assert "Worker 单轮处理失败" in caplog.text  # 响亮记录，不静默吞掉
+    assert _session_row(db_session_factory, next_id).status == "completed"
+    # 中断会话留在 running，资金原样在账（退款归僵尸巡检，Worker 不越权）
+    row = _session_row(db_session_factory, crashed_id)
+    assert row.status == "running"
+    assert _refund_rows(db_session_factory, crashed_id) == []
+    next_row = _session_row(db_session_factory, next_id)
+    assert _balance_fen(db_session_factory, user.id) == (
+        INITIAL_BALANCE_FEN - row.charged_fen - next_row.charged_fen
+    )
     assert_ledger_reconciles(db_session_factory, user.id)
 
 

@@ -21,7 +21,10 @@ from app.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False：fileConfig 默认会禁用导入应用模块时已
+    # 创建的 logger（如 app.worker），任何"先 import 应用、后跑迁移"的进程
+    # （测试引导、部署脚本）应用日志都会被静默——显式关闭。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
