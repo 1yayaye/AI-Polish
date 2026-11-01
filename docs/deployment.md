@@ -83,9 +83,16 @@ python -m piptools compile requirements.in && python -m piptools compile require
 
 ## 7. HTTPS（上线前必做）
 
-当前样例为 HTTP 基线。绑定域名后用 certbot 签发证书并开启 443，管理端 JWT cookie 与卡密传输都应走 TLS：
+Nginx 基线默认 HTTPS：80 端口只做 ACME 验证与 301 跳转，业务流量全部走 443（`deploy/nginx/ai-polish.conf`），管理端 JWT cookie 与卡密传输不落明文。443 块随配置附带但整体注释——证书在签发前不存在，先启用会让 `nginx -t` 失败、deploy.sh 中止。证书就绪前站点经 80 一律跳向尚不可用的 HTTPS，属预期。
 
 ```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d <域名>
+# 1. 签发证书（webroot 走 80 端口的 ACME 验证路径；<域名> 换成实际域名）
+sudo apt install -y certbot
+sudo mkdir -p /var/www/certbot
+sudo certbot certonly --webroot -w /var/www/certbot -d <域名>
+
+# 2. 启用 443：取消 ai-polish.conf 中 443 server 块的注释，核对证书路径
+sudo nginx -t && sudo systemctl reload nginx
 ```
+
+续期由 certbot 的 systemd timer 自动完成（webroot 路径在签发时已记入续期配置）；为让新证书即时生效，启用 443 后执行 `sudo certbot renew --deploy-hook "systemctl reload nginx"` 把 reload 挂进续期流程。
