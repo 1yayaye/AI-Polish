@@ -15,6 +15,7 @@ import { NavLink, Route, Routes } from 'react-router-dom'
 import { AdminError, adminLogin, adminLogout, getAdminSession, onUnauthorized } from './api'
 import ConfigPage from './ConfigPage'
 import LedgerPage from './LedgerPage'
+import PromptsPage from './PromptsPage'
 import SessionsPage from './SessionsPage'
 import UsersPage from './UsersPage'
 
@@ -129,7 +130,8 @@ export default function AdminApp() {
 
   // antd App 提供 message 等反馈组件的上下文，运营页面统一经它提示。
   // 运营页在 /admin 路径树内按嵌套路由切换：用户管理（含某用户流水深链
-  // /admin/users/:id）与全局流水。401 统一回登录表单，与具体页面无关。
+  // /admin/users/:id）、全局流水、会话监控、系统配置与提示词管理。401 统一
+  // 回登录表单，与具体页面无关。
   return (
     <AntApp>
       <Layout style={{ minHeight: '100vh' }}>
@@ -171,6 +173,14 @@ export default function AdminApp() {
             >
               系统配置
             </NavLink>
+            <NavLink
+              to="/admin/prompts"
+              style={({ isActive }) => ({
+                color: isActive ? '#fff' : 'rgba(255,255,255,0.65)',
+              })}
+            >
+              提示词管理
+            </NavLink>
           </Space>
           <span style={{ color: 'rgba(255,255,255,0.65)', marginLeft: 'auto' }}>
             {view.username}
@@ -185,7 +195,7 @@ export default function AdminApp() {
             <Route path="sessions" element={<SessionsPage />} />
             <Route path="sessions/:sessionId" element={<SessionsPage />} />
             <Route path="config" element={<ConfigPage />} />
-            {/* 提示词管理等其余运营功能由 M3 后续票接入 */}
+            <Route path="prompts" element={<PromptsPage />} />
           </Routes>
         </Layout.Content>
       </Layout>

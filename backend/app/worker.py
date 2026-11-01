@@ -13,8 +13,10 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
 
 提示词解析（每阶段一次，非每段落）：该用户在该阶段启用的自定义默认提示词
 （custom_prompts 的 default 行，见 :meth:`_custom_default_prompt`）优先，
-无则回落系统种子（:func:`_system_prompt_for`）。断点续跑重入 :meth:`_process`
-时重新解析——用户中途改默认提示词会影响续跑段落，属可接受语义。
+无则回落库内默认启用的系统提示词行（app.prompts，方案 A：DB 为唯一事实源，
+issue #23/#30）——后台改系统行正文，下一个会话即消费新正文，无需发版。
+断点续跑重入 :meth:`_process` 时重新解析——用户中途改默认提示词会影响续跑
+段落，属可接受语义。
 
 失败语义：
 - LLM 调用抛 :class:`app.llm.LLMError`（内容性错误，或瞬时错误重试耗尽）：
@@ -37,7 +39,6 @@ LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方�
 """
 
 import asyncio
-import functools
 import logging
 from collections.abc import Callable
 from typing import Protocol
@@ -45,7 +46,7 @@ from typing import Protocol
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import optimization, seeds, stream
+from app import optimization, prompts, stream
 from app.db import short_tx
 from app.llm import LLMError
 from app.models import CustomPrompt, OptimizationSession, Segment, SegmentChangeLog
@@ -59,18 +60,6 @@ class SegmentPolisher(Protocol):
     model_name: str
 
     async def polish(self, text: str, *, system_prompt: str) -> str: ...
-
-
-@functools.lru_cache(maxsize=1)
-def _system_prompt_for(stage: str) -> str:
-    """系统级回落提示词：取系统种子（代码固化的运营商调优资产）中该阶段
-    的默认启用条目。仅当该用户在该阶段无启用的自定义默认提示词时使用
-    （见 _process 与 _custom_default_prompt）；构造参数 prompt_for 可整体
-    替换本回落解析（测试接缝）。"""
-    for item in seeds.load_system_prompts():
-        if item["stage"] == stage and item.get("is_default", True) and item.get("is_active", True):
-            return item["content"]
-    raise ValueError(f"系统种子缺少 stage={stage} 的默认提示词")
 
 
 class PipelineWorker:
@@ -89,7 +78,7 @@ class PipelineWorker:
         self._session_factory = session_factory
         self._llm = llm
         self._poll_interval = poll_interval_seconds
-        self._prompt_for = prompt_for or _system_prompt_for
+        self._prompt_for: Callable[[str], str] = prompt_for or self._db_system_prompt
 
     async def run_forever(self) -> None:
         """常驻循环：拉到会话立刻处理下一个，空转按间隔轮询数据库。
@@ -160,22 +149,21 @@ class PipelineWorker:
     def _custom_default_prompt(self, user_id: int, stage: str) -> str | None:
         """该用户在该阶段启用的自定义默认提示词正文；无则 None（只读短事务）。
 
-        "同用户同阶段至多一个默认"的不变量由将来的提示词管理接口维护；读取
-        端按 updated_at/id 最新优先，脏数据（多条 default）下选取仍是确定的。
+        查询与"至多一个默认"不变量归 app.prompts（提示词服务）拥有。
         user_id 过滤天然排除 is_system 行（系统行 user_id 为 NULL）。
         """
         with short_tx(self._session_factory) as session:
-            return session.execute(
-                select(CustomPrompt.content)
-                .where(
-                    CustomPrompt.user_id == user_id,
-                    CustomPrompt.stage == stage,
-                    CustomPrompt.is_default.is_(True),
-                    CustomPrompt.is_active.is_(True),
-                )
-                .order_by(CustomPrompt.updated_at.desc(), CustomPrompt.id.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+            return prompts.user_default_content(session, user_id, stage)
+
+    def _db_system_prompt(self, stage: str) -> str:
+        """系统级回落提示词：库内该阶段默认启用的系统提示词行（只读短事务）。
+
+        方案 A（issue #23/#30）的事实源：custom_prompts 的 is_system 行，
+        运营商后台改完即对后续会话生效。仅当该用户在该阶段无启用的自定义
+        默认提示词时使用；构造参数 prompt_for 可整体替换本回落解析（测试接缝）。
+        """
+        with short_tx(self._session_factory) as session:
+            return prompts.system_content(session, stage)
 
     async def _process(self, session_id: int, user_id: int, mode: str) -> None:
         stages = optimization.stages_for_mode(mode)

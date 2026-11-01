@@ -23,11 +23,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session
 
-from app import billing, llm, optimization
+from app import billing, llm, optimization, prompts
 from app.billing import BillingError, InsufficientBalance
 from app.config import settings
 from app.db import get_session
-from app.models import LedgerEntry, OptimizationSession, Segment, User, mask_card_key
+from app.models import (
+    CustomPrompt,
+    LedgerEntry,
+    OptimizationSession,
+    Segment,
+    User,
+    mask_card_key,
+)
 
 router = APIRouter(prefix="/api/admin")
 
@@ -680,3 +687,154 @@ def read_config(_admin: str = Depends(get_current_admin)) -> AdminConfigView:
         admin_password=SecretStatus(configured=bool(settings.admin_password)),
         jwt_secret=SecretStatus(configured=bool(settings.jwt_secret)),
     )
+
+
+# ---- 提示词管理（issue #30，issue #23 方案 A：DB 为唯一事实源）----
+#
+# 系统提示词的唯一正文来源是 custom_prompts 的 is_system 行（解析回落链与
+# "同阶段至多一个默认"不变量归 app.prompts 拥有）：编辑走本组接口落库，改完
+# 即对后续会话生效，无需发版。用户自定义行只读可见（排查"润色效果不对"时看
+# 用户的默认提示词）；默认的选择权在用户手里，运营商不代改。写路径只有系统行
+# 正文与默认两项，不触碰任何资金字段。
+
+
+class AdminPrompt(BaseModel):
+    """提示词行。user_id 为空即系统行（正文可编辑）；用户行 card_key 为脱敏
+    形态（客诉时对上人）。content 全文返回——本组接口就是编辑入口。"""
+
+    id: int
+    user_id: int | None
+    card_key: str | None
+    name: str
+    stage: str
+    content: str
+    is_default: bool
+    is_system: bool
+    is_active: bool
+    updated_at: datetime
+
+
+class AdminPromptPage(BaseModel):
+    """提示词分页（系统行在前、行内按 id，阶段分组稳定）。total 为过滤后
+    的总数，供前端换算总页数。"""
+
+    items: list[AdminPrompt]
+    total: int
+    page: int
+    page_size: int
+
+
+def _prompt_view(session: Session, row: CustomPrompt) -> AdminPrompt:
+    card_key = None
+    if row.user_id is not None:
+        card_key = mask_card_key(
+            session.scalar(select(User.card_key).where(User.id == row.user_id))
+        )
+    return AdminPrompt(
+        id=row.id,
+        user_id=row.user_id,
+        card_key=card_key,
+        name=row.name,
+        stage=row.stage,
+        content=row.content,
+        is_default=row.is_default,
+        is_system=row.is_system,
+        is_active=row.is_active,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/prompts")
+def list_prompts(
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=100)] = 20,
+    stage: Annotated[str | None, Field(max_length=50)] = None,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminPromptPage:
+    """提示词分页列表：系统行 + 用户自定义行同页可辨（scope 看字段，不靠
+    接口分叉），stage 过滤可选（词表外的取值过滤后为空，不报错）。纯只读。"""
+    where = CustomPrompt.stage == stage if stage else true()
+    total = session.execute(
+        select(func.count()).select_from(CustomPrompt).where(where)
+    ).scalar_one()
+    rows = session.execute(
+        select(CustomPrompt, User.card_key)
+        .join(User, User.id == CustomPrompt.user_id, isouter=True)
+        .where(where)
+        .order_by(CustomPrompt.stage, CustomPrompt.is_system.desc(), CustomPrompt.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return AdminPromptPage(
+        items=[
+            AdminPrompt(
+                id=row.id,
+                user_id=row.user_id,
+                card_key=mask_card_key(card_key) if card_key is not None else None,
+                name=row.name,
+                stage=row.stage,
+                content=row.content,
+                is_default=row.is_default,
+                is_system=row.is_system,
+                is_active=row.is_active,
+                updated_at=row.updated_at,
+            )
+            for row, card_key in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+class PromptContentUpdate(BaseModel):
+    """系统行正文编辑：非空正文整体替换（无增量语义可言）。"""
+
+    content: str = Field(min_length=1)
+
+
+def _owned_system_prompt(
+    session: Session,
+    prompt_id: int,
+    operation,  # prompts.edit_system_content | prompts.set_system_default
+    **kwargs: object,
+) -> CustomPrompt:
+    """提示词写操作的统一异常映射：不存在 404、用户行只读 409——两个写
+    端点共享同一张契约表，调用方（前端）只学一次错误语义。"""
+    try:
+        return operation(session, prompt_id, **kwargs)
+    except prompts.PromptNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="提示词不存在") from None
+    except prompts.PromptReadOnly:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="用户自定义提示词只读，不能修改"
+        ) from None
+
+
+@router.put("/prompts/{prompt_id}/content")
+def edit_prompt_content(
+    prompt_id: int,
+    body: PromptContentUpdate,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminPrompt:
+    """编辑系统提示词正文（本里程碑唯一新增的写路径，落库即生效）：下一个
+    会话的流水线消费点（app.worker / app.prompts）读到的就是新正文。用户行
+    409 只读；不存在 404。不触碰任何资金字段。"""
+    row = _owned_system_prompt(session, prompt_id, prompts.edit_system_content,
+                               content=body.content)
+    return _prompt_view(session, row)
+
+
+@router.put("/prompts/{prompt_id}/default")
+def set_prompt_default(
+    prompt_id: int,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminPrompt:
+    """把系统行设为其阶段默认并收口"(user_id=NULL, stage) 至多一个默认"的
+    不变量（app.prompts 拥有）：同阶段其余默认行同事务降级，重复/并发设默认
+    被收口为恰好一个。用户行 409 只读；不存在 404。"""
+    row = _owned_system_prompt(session, prompt_id, prompts.set_system_default)
+    return _prompt_view(session, row)

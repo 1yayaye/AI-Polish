@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from app import db as app_db
 from app import llm as app_llm
 from app import recovery as app_recovery
+from app import seeds as app_seeds
 from app.admin import router as admin_router
 from app.api import router
 from app.export import router as export_router
@@ -36,6 +37,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     该盲区由 app.recovery.report_orphan_queued 的日志显性化。
     """
     background_tasks: list[asyncio.Task[None]] = []
+    # 方案 A（issue #23/#30）：库内 is_system 行是系统提示词唯一事实源，空库
+    # 在首次启动时注入种子（幂等：按 (stage, name) 判重、不覆盖已改动行）——
+    # 运营商调优资亷新部署即可用，提示词回落链在空库上也完整，无需手工跑
+    # 注入命令。失败即启动期硬错误（库不可用，Worker 也无从工作）。
+    with app_db.SessionLocal() as session:
+        app_seeds.seed_system_prompts(session)
+        session.commit()
     if app_llm.is_configured():
         app_recovery.recover_interrupted(app_db.SessionLocal)
         worker = PipelineWorker(app_db.SessionLocal, PolishLLMClient.from_settings())

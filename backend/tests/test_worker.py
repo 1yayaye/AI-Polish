@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import sessionmaker
 
-from app import billing, optimization, worker as worker_mod
+from app import billing, optimization, seeds, worker as worker_mod
 from app.config import settings
 from app.llm import LLMContentError, LLMTransientError
 import app.main as app_main
@@ -848,6 +848,82 @@ def test_custom_default_prompt_does_not_disturb_billing(
     assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN - row.charged_fen
     assert _refund_rows(db_session_factory, session_id) == []
     assert_ledger_reconciles(db_session_factory, user.id)
+
+
+# ---- 系统提示词唯一事实源（issue #30，方案 A）：库内系统行即消费正文 ----
+
+
+def _seed_system_prompts(db_session_factory: sessionmaker) -> list[CustomPrompt]:
+    """空库注入系统种子（与 app.main.lifespan / 迁移脚本同一入口）。"""
+    session = db_session_factory()
+    try:
+        seeds.seed_system_prompts(session)
+        session.commit()
+        return list(
+            session.execute(
+                select(CustomPrompt).where(CustomPrompt.is_system.is_(True))
+            ).scalars()
+        )
+    finally:
+        session.close()
+
+
+def test_operator_edited_system_prompt_is_consumed_by_next_session(
+    funded_user: Callable[..., User],
+    logged_in_client,
+    db_session_factory: sessionmaker,
+) -> None:
+    """验收（issue #30）：运营商经后台改系统提示词正文后，新会话的流水线
+    消费的就是新正文——不存在"改了不生效"的第二事实源。Worker 用生产默认
+    回落解析（不注入 prompt_for 接缝）：正文改在库里，JSON 种子里的旧正文
+    不再参与运行时解析。"""
+    (polish_row,) = [
+        r for r in _seed_system_prompts(db_session_factory) if r.stage == "polish"
+    ]
+    response = logged_in_client.put(
+        f"/api/admin/prompts/{polish_row.id}/content",
+        json={"content": "运营改过的润色提示词"},
+    )
+    assert response.status_code == 200, response.text
+
+    user = funded_user()
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("运营改过的润色提示词", 0): "润色0"})
+    worker = worker_mod.PipelineWorker(db_session_factory, llm)
+
+    assert asyncio.run(worker.process_next()) is True
+
+    assert _session_row(db_session_factory, session_id).status == "completed"
+    assert [call[0] for call in llm.calls] == ["运营改过的润色提示词"]
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_lifespan_seeds_empty_db_and_never_overrides_edited_rows(
+    client, db_session_factory: sessionmaker
+) -> None:
+    """JSON 种子只在新空库首次启动时注入（幂等语义）：二次启动既不新增行，
+    也不把运营商改过的正文覆盖回种子值。"""
+    with client:  # 首次启动：空库注入种子
+        pass
+    rows = _seed_system_prompts(db_session_factory)
+    assert {(r.stage, r.name) for r in rows} == {
+        ("polish", "默认润色提示词"),
+        ("enhance", "默认增强提示词"),
+    }
+    (polish_row,) = [r for r in rows if r.stage == "polish"]
+    session = db_session_factory()
+    try:
+        row = session.get(CustomPrompt, polish_row.id)
+        row.content = "运营改过的正文"
+        session.commit()
+    finally:
+        session.close()
+
+    with client:  # 二次启动：判重跳过，不覆盖已改动行
+        pass
+    rows = _seed_system_prompts(db_session_factory)
+    assert len(rows) == 2  # 没有重复注入
+    assert next(r for r in rows if r.stage == "polish").content == "运营改过的正文"
 
 
 # ---- lifespan 装配：模型接入齐备才启动 Worker，关停即取消 ----

@@ -87,11 +87,14 @@ class LedgerEntry(Base):
 
 
 class CustomPrompt(Base):
-    """调优提示词：系统预设（is_system=True，内容由代码种子注入）或用户自定义。
+    """调优提示词：系统预设（is_system=True）或用户自定义。
 
-    系统预设的正文唯一来源是 app/seed_data/system_prompts.json（运营商调优
-    资产固化进代码，重建空库经 app.seeds 注入）；用户自定义提示词由 T5 迁移
-    自旧库整行搬入。两类的区分只看 is_system，不靠 user_id 是否为空。
+    方案 A（issue #23 裁决，issue #30 落地）：系统行的正文是系统提示词唯一
+    事实源——管理后台编辑库内行（app.prompts 拥有写路径与解析回落链），改完
+    即对后续会话生效；app/seed_data/system_prompts.json 降级为空库首次注入的
+    种子（app.seeds 幂等注入，不覆盖已改动行），不参与运行时解析。用户自定义
+    提示词由 T5 迁移自旧库整行搬入，后台只读。两类的区分只看 is_system，
+    不靠 user_id 是否为空。
     """
 
     __tablename__ = "custom_prompts"
@@ -104,8 +107,8 @@ class CustomPrompt(Base):
     stage: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # 同用户同阶段至多一个默认提示词；流水线每阶段的消费点在 app.worker
-    # （_custom_default_prompt）。该不变量由将来的提示词管理接口（M3）维护，
-    # 读取端按 updated_at/id 最新优先防御脏数据
+    # （_custom_default_prompt）。该不变量由提示词服务（app.prompts，M3/T6
+    # 管理接口为其唯一写路径）维护，读取端按 updated_at/id 最新优先防御脏数据
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

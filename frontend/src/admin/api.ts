@@ -312,3 +312,66 @@ export interface AdminConfigView {
 export function getAdminConfig(): Promise<AdminConfigView> {
   return request('/api/admin/config')
 }
+
+// ---- 提示词管理（issue #30，方案 A：DB 为唯一事实源）----
+
+/**
+ * 提示词行。user_id 为空即系统行（正文可编辑）；用户行 card_key 为脱敏
+ * 形态且只读（默认的选择权在用户手里，运营商只查看不代改）。
+ */
+export interface AdminPrompt {
+  id: number
+  user_id: number | null
+  card_key: string | null
+  name: string
+  stage: string
+  content: string
+  is_default: boolean
+  is_system: boolean
+  is_active: boolean
+  updated_at: string
+}
+
+export interface AdminPromptPage {
+  items: AdminPrompt[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/** 提示词分页列表（系统行 + 用户自定义行同页可辨），stage 过滤可选。 */
+export function listPrompts(params: {
+  page: number
+  page_size: number
+  stage?: string
+}): Promise<AdminPromptPage> {
+  const query = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.page_size),
+  })
+  if (params.stage) query.set('stage', params.stage)
+  return request(`/api/admin/prompts?${query.toString()}`)
+}
+
+/**
+ * 编辑系统提示词正文：落库即生效，下一个会话的流水线消费的就是新正文，
+ * 无需发版。用户自定义行返回 409（只读）。
+ */
+export function updateSystemPromptContent(
+  promptId: number,
+  content: string,
+): Promise<AdminPrompt> {
+  return request(`/api/admin/prompts/${promptId}/content`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+}
+
+/**
+ * 把系统行设为其阶段默认：后端同事务降级同阶段其余默认行，重复/并发设默认
+ * 被收口为恰好一个。用户自定义行返回 409（只读）。
+ */
+export function setSystemPromptDefault(promptId: number): Promise<AdminPrompt> {
+  return request(`/api/admin/prompts/${promptId}/default`, { method: 'PUT' })
+}

@@ -1,13 +1,15 @@
-"""系统预设提示词的代码种子：调优资产固化进代码，重建空库可注入。
+"""系统预设提示词的代码种子：调优资产固化进代码，空库首次启动时注入。
 
-运营商调优过的 is_system=True 提示词不随数据库走，而以
-``app/seed_data/system_prompts.json`` 为唯一正文来源（T5 迁移的
-``--export-seed`` 从旧库导出生成）。注入是幂等的：以
-(is_system, user_id IS NULL, stage, name) 判重，已存在（含内容被
-后续运营改动过）的行不会被覆盖——种子的职责是"从无到有"，不是"保持一致"。
+方案 A（issue #23 裁决，issue #30 落地）后，custom_prompts 的 is_system 行
+是系统提示词唯一事实源（运行时消费只读库，app.prompts），本模块的
+``app/seed_data/system_prompts.json``（T5 迁移 ``--export-seed`` 从旧库导出）
+降级为**空库首次注入的种子**：应用启动（app.main.lifespan）与旧库迁移脚本
+（backend/scripts/migrate_old_db.py）都会调用 :func:`seed_system_prompts`。
+注入是幂等的：以 (is_system, user_id IS NULL, stage, name) 判重，已存在
+（含内容被后续运营在后台改过）的行不会被覆盖——种子的职责是"从无到有"，
+不是"保持一致"，库内行的后续演化只发生在数据库里。
 
-独立注入入口：``python -m app.seeds``（对 .env 指向的库执行）；
-迁移脚本在同一事务内调用 :func:`seed_system_prompts` 完成同等注入。
+独立注入入口：``python -m app.seeds``（对 .env 指向的库执行）。
 """
 
 import json
@@ -24,7 +26,7 @@ SEED_FILE = Path(__file__).parent / "seed_data" / "system_prompts.json"
 def load_system_prompts(path: Path | None = None) -> list[dict]:
     """读取种子文件，返回可交给 :func:`seed_system_prompts` 的提示词字典列表。
 
-    文件缺失或结构不对当场抛错：种子是调优资产的唯一来源，静默回退到
+    文件缺失或结构不对当场抛错：种子是空库初始化的唯一来源，静默回退到
     空列表等于悄悄丢失运营商资产。
     """
     with (path or SEED_FILE).open(encoding="utf-8") as f:
