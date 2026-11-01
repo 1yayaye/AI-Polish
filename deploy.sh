@@ -19,6 +19,11 @@ for cmd in npm python3 systemctl nginx curl; do
   command -v "$cmd" >/dev/null || die "缺少命令：$cmd（安装步骤见 docs/deployment.md）"
 done
 
+# 依赖锁定版本按 Python 3.13 生成，其他小版本不保证兼容
+py3_minor=$(python3 -c 'import sys; print(sys.version_info[1])')
+[ "$(python3 -c 'import sys; print(sys.version_info[0])')" = "3" ] && [ "$py3_minor" = "13" ] \
+  || die "python3 须为 Python 3.13.x（当前 $(python3 -V 2>&1)）；安装方法见 docs/deployment.md §1"
+
 log "构建前端（构建内存上限 384MB，适配 512MB 服务器）..."
 cd "$REPO_DIR/frontend"
 npm ci

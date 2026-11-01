@@ -9,8 +9,12 @@
 # 部署用系统用户（服务以此身份运行，无登录 shell）
 sudo useradd --system --home /opt/ai-polish --shell /usr/sbin/nologin aipolish
 
-# 基础软件
-sudo apt update && sudo apt install -y python3 python3-venv nginx nodejs npm
+# 基础软件。Python 必须 3.13.x（后端依赖锁定版本按 3.13 生成）：
+# Ubuntu 24.04 自带 3.12，需经 deadsnakes PPA 安装并设为默认 python3
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update
+sudo apt install -y python3.13 python3.13-venv nginx nodejs npm
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1
+python3 --version   # 检查命令：必须输出 Python 3.13.x，deploy.sh 也会强制校验
 
 # 拉取代码到约定路径（systemd/Nginx 配置写死此路径）
 sudo mkdir -p /opt/ai-polish && sudo chown aipolish:aipolish /opt/ai-polish
