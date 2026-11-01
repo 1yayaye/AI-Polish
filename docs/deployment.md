@@ -12,9 +12,14 @@ sudo useradd --system --home /opt/ai-polish --shell /usr/sbin/nologin aipolish
 # 基础软件。Python 必须 3.13.x（后端依赖锁定版本按 3.13 生成）：
 # Ubuntu 24.04 自带 3.12，需经 deadsnakes PPA 安装并设为默认 python3
 sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update
-sudo apt install -y python3.13 python3.13-venv nginx nodejs npm
+sudo apt install -y python3.13 python3.13-venv nginx
 sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1
 python3 --version   # 检查命令：必须输出 Python 3.13.x，deploy.sh 也会强制校验
+
+# Node 必须 20.19+ / 22.12+（Vite 7 要求；Ubuntu 24.04 apt 源是 18.x，构建链不支持）：
+# 经 NodeSource 安装 Node 22（含 npm），deploy.sh 会强制校验
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt install -y nodejs
+node --version      # 检查命令：应输出 v22.x
 
 # 拉取代码到约定路径（systemd/Nginx 配置写死此路径）
 sudo mkdir -p /opt/ai-polish && sudo chown aipolish:aipolish /opt/ai-polish
@@ -54,7 +59,7 @@ sudo ./deploy.sh
 
 ```bash
 curl http://127.0.0.1:8000/health   # {"status":"ok"}
-curl http://127.0.0.1/health        # 经 Nginx
+curl http://127.0.0.1/health        # 经 Nginx（80 块的 /health 直接反代后端，证书签发前也可用）
 ```
 
 `/health` 只证明服务活着，不触库。再确认 schema 与种子已就位（`/health` 通过但表缺失时，触库的 `/api` 调用会 500）：
@@ -87,7 +92,7 @@ python -m piptools compile requirements.in && python -m piptools compile require
 
 ## 7. HTTPS（上线前必做）
 
-Nginx 基线默认 HTTPS：80 端口只做 ACME 验证与 301 跳转，业务流量全部走 443（`deploy/nginx/ai-polish.conf`），管理端 JWT cookie 与卡密传输不落明文。443 块随配置附带但整体注释——证书在签发前不存在，先启用会让 `nginx -t` 失败、deploy.sh 中止。证书就绪前站点经 80 一律跳向尚不可用的 HTTPS，属预期。
+Nginx 基线默认 HTTPS：80 端口做 ACME 验证、`/health` 探活与 301 跳转，业务流量全部走 443（`deploy/nginx/ai-polish.conf`），管理端 JWT cookie 与卡密传输不落明文。443 块随配置附带但整体注释——证书在签发前不存在，先启用会让 `nginx -t` 失败、deploy.sh 中止。证书就绪前业务流量经 80 跳向尚不可用的 HTTPS，属预期（`/health` 除外，始终直接反代后端）。
 
 ```bash
 # 1. 签发证书（webroot 走 80 端口的 ACME 验证路径；<域名> 换成实际域名）

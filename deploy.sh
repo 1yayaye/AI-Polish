@@ -24,6 +24,10 @@ py3_minor=$(python3 -c 'import sys; print(sys.version_info[1])')
 [ "$(python3 -c 'import sys; print(sys.version_info[0])')" = "3" ] && [ "$py3_minor" = "13" ] \
   || die "python3 须为 Python 3.13.x（当前 $(python3 -V 2>&1)）；安装方法见 docs/deployment.md §1"
 
+# 前端构建链（Vite 7）要求 Node 20.19+ / 22.12+，apt 自带的 18.x 只会得到警告
+node -p 'const [a,b]=process.versions.node.split(".").map(Number);(a>22)||(a===22&&b>=12)||(a===20&&b>=19)' >/dev/null 2>&1 \
+  || die "node 须为 20.19+ / 22.12+（当前 $(node -v 2>&1)）；安装方法见 docs/deployment.md §1"
+
 log "构建前端（构建内存上限 384MB，适配 512MB 服务器）..."
 cd "$REPO_DIR/frontend"
 npm ci
@@ -59,6 +63,12 @@ log "安装 systemd unit 与 Nginx 配置..."
 install -m 644 "$REPO_DIR/deploy/systemd/ai-polish.service" /etc/systemd/system/ai-polish.service
 systemctl daemon-reload
 systemctl enable ai-polish >/dev/null
+
+# 发行版自带的默认站点与本配置同为 server_name _，二者并存时本站点会被 nginx 忽略
+if [ -f /etc/nginx/sites-enabled/default ]; then
+  rm -f /etc/nginx/sites-enabled/default
+  log "已移除 Nginx 默认站点（server_name 冲突会导致本站点被忽略）"
+fi
 
 if [ -d /etc/nginx/sites-available ]; then
   install -m 644 "$REPO_DIR/deploy/nginx/ai-polish.conf" /etc/nginx/sites-available/ai-polish.conf
