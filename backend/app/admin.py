@@ -12,12 +12,13 @@
 
 import secrets
 import time
+from functools import reduce
 from typing import Annotated
 
 import jwt
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app import billing
@@ -192,22 +193,66 @@ class AdminUserSummary(BaseModel):
     usage_remaining: int
 
 
+class AdminUserPage(BaseModel):
+    """用户分页列表。total 为过滤后的用户总数，供前端换算总页数。"""
+
+    items: list[AdminUserSummary]
+    total: int
+    page: int
+    page_size: int
+
+
 @router.get("/users")
 def list_users(
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=100)] = 20,
+    q: Annotated[str | None, Field(max_length=64)] = None,
     _admin: str = Depends(get_current_admin),
     session: Session = Depends(get_session),
-) -> list[AdminUserSummary]:
-    users = session.execute(select(User).order_by(User.id)).scalars().all()
-    return [
-        AdminUserSummary(
-            id=u.id,
-            card_key=mask_card_key(u.card_key),
-            balance_fen=u.balance_fen,
-            usage_limit=u.usage_limit,
-            usage_remaining=u.usage_remaining,
+) -> AdminUserPage:
+    """用户分页列表，可按卡密片段或用户 ID 搜索（客诉定位入口，spec #15
+    用户故事 4/5）。搜索词 q 为一个可选参数：纯数字视为用户 ID 精确匹配，
+    其余（含数字与非数字混合片段）按卡密子串匹配——调用方不区分两种搜索，
+    同一个输入框两种都能命中。
+
+    纯只读接口：不写 users 资金字段、不落账本行（账本只归计费服务写）。
+    """
+    conditions = []
+    if q is not None and q.strip():
+        q = q.strip()
+        if q.isdigit():
+            conditions.append(or_(User.id == int(q), User.card_key.contains(q, autoescape=True)))
+        else:
+            conditions.append(User.card_key.contains(q, autoescape=True))
+    where = reduce(and_, conditions) if conditions else true()
+
+    total = session.execute(select(func.count()).select_from(User).where(where)).scalar_one()
+    users = (
+        session.execute(
+            select(User)
+            .where(where)
+            .order_by(User.id)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         )
-        for u in users
-    ]
+        .scalars()
+        .all()
+    )
+    return AdminUserPage(
+        items=[
+            AdminUserSummary(
+                id=u.id,
+                card_key=mask_card_key(u.card_key),
+                balance_fen=u.balance_fen,
+                usage_limit=u.usage_limit,
+                usage_remaining=u.usage_remaining,
+            )
+            for u in users
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 class BalanceAdjustRequest(BaseModel):

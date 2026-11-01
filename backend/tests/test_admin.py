@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
-from app.models import User
+from app.models import LedgerEntry, User
 from tests.conftest import ADMIN_PASSWORD, ADMIN_USERNAME
 
 COOKIE_NAME = "admin_session"
@@ -214,11 +214,114 @@ def test_user_list_masks_card_key_and_shows_dual_track_quota(
     response = logged_in_client.get("/api/admin/users")
 
     assert response.status_code == 200
-    users = response.json()
-    assert len(users) == 1
-    row = users[0]
+    page = response.json()
+    assert page["total"] == 1
+    assert len(page["items"]) == 1
+    row = page["items"][0]
     assert row["card_key"] == "card****1234"
     assert "card-secret-1234" not in response.text  # 全量卡密绝不出现
     assert row["balance_fen"] == 500
     assert row["usage_limit"] == 10
     assert row["usage_remaining"] == 7
+
+
+# ---- 用户列表分页与搜索（issue #26）----
+
+
+def _seed_users(make_user, count: int) -> list[int]:
+    return [make_user(card_key=f"fragment-user-{i:02d}-zzz").id for i in range(count)]
+
+
+def test_user_list_paginates(logged_in_client: TestClient, make_user) -> None:
+    ids = _seed_users(make_user, 5)
+
+    response = logged_in_client.get("/api/admin/users", params={"page": 2, "page_size": 2})
+
+    assert response.status_code == 200
+    page = response.json()
+    assert page["total"] == 5
+    assert page["page"] == 2
+    assert page["page_size"] == 2
+    assert [row["id"] for row in page["items"]] == ids[2:4]  # 按 id 稳定排序
+
+    first = logged_in_client.get("/api/admin/users", params={"page": 1, "page_size": 2}).json()
+    assert [row["id"] for row in first["items"]] == ids[:2]
+
+    last = logged_in_client.get("/api/admin/users", params={"page": 3, "page_size": 2}).json()
+    assert [row["id"] for row in last["items"]] == ids[4:]
+
+
+def test_user_list_rejects_out_of_range_paging(logged_in_client: TestClient) -> None:
+    """page/page_size 越界是调用方 bug：422 拒绝，不静默截断。"""
+    assert logged_in_client.get("/api/admin/users", params={"page": 0}).status_code == 422
+    assert logged_in_client.get("/api/admin/users", params={"page_size": 0}).status_code == 422
+    assert logged_in_client.get("/api/admin/users", params={"page_size": 101}).status_code == 422
+
+
+def test_user_search_by_card_key_fragment(logged_in_client: TestClient, make_user) -> None:
+    _seed_users(make_user, 3)
+    target_id = make_user(card_key="needle-in-haystack-42").id
+
+    response = logged_in_client.get("/api/admin/users", params={"q": "needle-in"})
+
+    assert response.status_code == 200
+    page = response.json()
+    assert page["total"] == 1
+    assert [row["id"] for row in page["items"]] == [target_id]
+    # 搜索命中也不泄露全量卡密
+    assert "needle-in-haystack-42" not in response.text
+
+
+def test_user_search_by_user_id(logged_in_client: TestClient, make_user) -> None:
+    _seed_users(make_user, 3)
+    target_id = make_user(card_key="abc-999-xyz").id
+
+    response = logged_in_client.get("/api/admin/users", params={"q": str(target_id)})
+
+    assert response.status_code == 200
+    page = response.json()
+    assert page["total"] == 1
+    assert [row["id"] for row in page["items"]] == [target_id]
+
+
+def test_user_search_no_match_returns_empty_page(logged_in_client: TestClient, make_user) -> None:
+    _seed_users(make_user, 2)
+
+    page = logged_in_client.get("/api/admin/users", params={"q": "no-such-key"}).json()
+
+    assert page["total"] == 0
+    assert page["items"] == []
+
+
+def test_user_search_whitespace_only_q_means_all(
+    logged_in_client: TestClient, make_user
+) -> None:
+    """空搜索框（含纯空格）不是搜索条件：返回全部用户。"""
+    _seed_users(make_user, 2)
+
+    page = logged_in_client.get("/api/admin/users", params={"q": "   "}).json()
+
+    assert page["total"] == 2
+
+
+def test_user_queries_never_write_ledger(
+    logged_in_client: TestClient, make_user, db_session_factory: sessionmaker
+) -> None:
+    """查询接口对资金字段零直接写：列表/搜索前后账本行数不变，
+    SUM(账本)==余额 的不变量没有第二条写路径可破坏。"""
+    make_user(card_key="reader-target-1")
+
+    def count_ledger() -> int:
+        session = db_session_factory()
+        try:
+            return session.query(LedgerEntry).count()
+        finally:
+            session.close()
+
+    before = count_ledger()
+
+    assert logged_in_client.get("/api/admin/users").status_code == 200
+    assert logged_in_client.get("/api/admin/users", params={"q": "reader"}).status_code == 200
+    assert logged_in_client.get("/api/admin/users", params={"q": "1"}).status_code == 200
+
+    assert count_ledger() == before
