@@ -1,4 +1,4 @@
-"""管理端（运营商后台）API：登录认证、卡密批量生成、用户列表。
+"""管理端（运营商后台）API：登录认证、卡密批量生成、用户列表、账本流水查询。
 
 认证模型：管理凭据只来自 .env（ADR-0005，改凭据 = 改文件 + 重启，不存在
 后台改密码的路径）。登录成功签发 HS256 JWT 存入 HttpOnly cookie，后续请求
@@ -12,6 +12,7 @@
 
 import secrets
 import time
+from datetime import datetime
 from functools import reduce
 from typing import Annotated
 
@@ -25,7 +26,7 @@ from app import billing
 from app.billing import BillingError, InsufficientBalance
 from app.config import settings
 from app.db import get_session
-from app.models import User, mask_card_key
+from app.models import LedgerEntry, User, mask_card_key
 
 router = APIRouter(prefix="/api/admin")
 
@@ -327,3 +328,105 @@ def adjust_user_usage(
     return UsageAdjustResponse(
         user_id=user_id, usage_limit=user.usage_limit, usage_remaining=usage_remaining
     )
+
+
+class AdminLedgerEntry(BaseModel):
+    """账本流水行：kind 的合法取值由 app.billing 拥有（充值/扣费/退款/
+    余额调整/次数预留/释放/额度调整）。amount_fen 为带符号增量（次数轨
+    恒为 0）；usage_after 仅次数轨非空。"""
+
+    id: int
+    user_id: int
+    task_id: int | None
+    kind: str
+    amount_fen: int
+    balance_after_fen: int
+    usage_after: int | None
+    reason: str
+    created_at: datetime
+
+
+class AdminLedgerPage(BaseModel):
+    """账本分页（新流水在前）。按用户查询时额外返回该用户的脱敏卡密，
+    供流水页标题展示；全局查询两字段为 None。"""
+
+    items: list[AdminLedgerEntry]
+    total: int
+    page: int
+    page_size: int
+    user_id: int | None = None
+    card_key: str | None = None
+
+
+def _ledger_page(
+    session: Session,
+    page: int,
+    page_size: int,
+    user_id: int | None = None,
+) -> AdminLedgerPage:
+    """账本分页查询（只读）：按 id 倒序即新流水在前——账本行只增不改，
+    id 单调递增，与写入时间同序（created_at 只有秒级精度，id 更稳定）。
+    不写 users 资金字段、不落账本行：账本只归计费服务写。"""
+    where = LedgerEntry.user_id == user_id if user_id is not None else true()
+    total = session.execute(
+        select(func.count()).select_from(LedgerEntry).where(where)
+    ).scalar_one()
+    entries = (
+        session.execute(
+            select(LedgerEntry)
+            .where(where)
+            .order_by(LedgerEntry.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+    return AdminLedgerPage(
+        items=[
+            AdminLedgerEntry(
+                id=e.id,
+                user_id=e.user_id,
+                task_id=e.task_id,
+                kind=e.kind,
+                amount_fen=e.amount_fen,
+                balance_after_fen=e.balance_after_fen,
+                usage_after=e.usage_after,
+                reason=e.reason,
+                created_at=e.created_at,
+            )
+            for e in entries
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        user_id=user_id,
+    )
+
+
+@router.get("/ledger")
+def list_recent_ledger(
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=100)] = 20,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminLedgerPage:
+    """全局最近流水（新流水在前），不点开每个用户也能发现异常。"""
+    return _ledger_page(session, page, page_size)
+
+
+@router.get("/users/{user_id}/ledger")
+def list_user_ledger(
+    user_id: int,
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=100)] = 20,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminLedgerPage:
+    """某用户的全部账本流水（客诉时回答"我的钱去哪了"）。用户不存在 404。"""
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    ledger_page = _ledger_page(session, page, page_size, user_id=user_id)
+    ledger_page.card_key = mask_card_key(user.card_key)
+    return ledger_page

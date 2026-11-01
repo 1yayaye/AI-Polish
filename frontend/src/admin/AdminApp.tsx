@@ -7,10 +7,13 @@ import {
   Form,
   Input,
   Layout,
+  Space,
   Spin,
   Typography,
 } from 'antd'
+import { NavLink, Route, Routes } from 'react-router-dom'
 import { AdminError, adminLogin, adminLogout, getAdminSession, onUnauthorized } from './api'
+import LedgerPage from './LedgerPage'
 import UsersPage from './UsersPage'
 
 /**
@@ -122,7 +125,9 @@ export default function AdminApp() {
     )
   }
 
-  // antd App 提供 message 等反馈组件的上下文，运营页面统一经它提示
+  // antd App 提供 message 等反馈组件的上下文，运营页面统一经它提示。
+  // 运营页在 /admin 路径树内按嵌套路由切换：用户管理（含某用户流水深链
+  // /admin/users/:id）与全局流水。401 统一回登录表单，与具体页面无关。
   return (
     <AntApp>
       <Layout style={{ minHeight: '100vh' }}>
@@ -130,14 +135,37 @@ export default function AdminApp() {
           <Typography.Title level={4} style={{ color: '#fff', margin: 0 }}>
             AI-Polish 管理后台
           </Typography.Title>
+          <Space size="middle">
+            <NavLink
+              to="/admin"
+              end
+              style={({ isActive }) => ({
+                color: isActive ? '#fff' : 'rgba(255,255,255,0.65)',
+              })}
+            >
+              用户管理
+            </NavLink>
+            <NavLink
+              to="/admin/ledger"
+              style={({ isActive }) => ({
+                color: isActive ? '#fff' : 'rgba(255,255,255,0.65)',
+              })}
+            >
+              全局流水
+            </NavLink>
+          </Space>
           <span style={{ color: 'rgba(255,255,255,0.65)', marginLeft: 'auto' }}>
             {view.username}
           </span>
           <Button onClick={handleLogout}>退出登录</Button>
         </Layout.Header>
         <Layout.Content style={{ padding: 24 }}>
-          <UsersPage />
-          {/* 流水/会话监控/配置面等其余运营功能由 M3 后续票接入 */}
+          <Routes>
+            <Route index element={<UsersPage />} />
+            <Route path="users/:userId" element={<LedgerPage />} />
+            <Route path="ledger" element={<LedgerPage />} />
+            {/* 会话监控/配置面等其余运营功能由 M3 后续票接入 */}
+          </Routes>
         </Layout.Content>
       </Layout>
     </AntApp>

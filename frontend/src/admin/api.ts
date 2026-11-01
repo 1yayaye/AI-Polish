@@ -157,3 +157,49 @@ export function adjustUserUsage(
     body: JSON.stringify(params),
   })
 }
+
+// ---- 账本流水查询（issue #27，只读接口）----
+
+/** 账本行：kind 合法取值由后端计费服务拥有；amount_fen 为带符号增量。 */
+export interface AdminLedgerEntry {
+  id: number
+  user_id: number
+  task_id: number | null
+  kind: string
+  amount_fen: number
+  balance_after_fen: number
+  usage_after: number | null
+  reason: string
+  created_at: string
+}
+
+export interface AdminLedgerPage {
+  items: AdminLedgerEntry[]
+  total: number
+  page: number
+  page_size: number
+  /** 仅按用户查询时返回；card_key 为脱敏形态，供流水页标题展示。 */
+  user_id?: number
+  card_key?: string
+}
+
+/** 全局最近流水（新流水在前）。 */
+export function listRecentLedger(params: { page: number; page_size: number }): Promise<AdminLedgerPage> {
+  const query = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.page_size),
+  })
+  return request(`/api/admin/ledger?${query.toString()}`)
+}
+
+/** 某用户的全部账本流水（新流水在前）。 */
+export function listUserLedger(
+  userId: number,
+  params: { page: number; page_size: number },
+): Promise<AdminLedgerPage> {
+  const query = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.page_size),
+  })
+  return request(`/api/admin/users/${userId}/ledger?${query.toString()}`)
+}

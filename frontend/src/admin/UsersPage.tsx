@@ -12,6 +12,7 @@ import {
   Table,
   Typography,
 } from 'antd'
+import { useNavigate } from 'react-router-dom'
 import {
   AdminError,
   AdminUnauthorized,
@@ -274,6 +275,7 @@ function AdjustModal({
 
 export default function UsersPage() {
   const { message } = AntApp.useApp()
+  const navigate = useNavigate()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [query, setQuery] = useState('')
@@ -352,7 +354,7 @@ export default function UsersPage() {
           {
             title: '操作',
             key: 'actions',
-            width: 200,
+            width: 260,
             render: (_, user) => (
               <Space>
                 <Button
@@ -363,6 +365,9 @@ export default function UsersPage() {
                 </Button>
                 <Button size="small" onClick={() => setAdjusting({ user, track: 'usage' })}>
                   次数调整
+                </Button>
+                <Button size="small" onClick={() => navigate(`/admin/users/${user.id}`)}>
+                  流水
                 </Button>
               </Space>
             ),
