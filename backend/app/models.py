@@ -11,7 +11,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -72,4 +72,55 @@ class LedgerEntry(Base):
             unique=True,
             sqlite_where=text("kind = 'refund' AND task_id IS NOT NULL"),
         ),
+    )
+
+
+class CustomPrompt(Base):
+    """调优提示词：系统预设（is_system=True，内容由代码种子注入）或用户自定义。
+
+    系统预设的正文唯一来源是 app/seed_data/system_prompts.json（运营商调优
+    资产固化进代码，重建空库经 app.seeds 注入）；用户自定义提示词由 T5 迁移
+    自旧库整行搬入。两类的区分只看 is_system，不靠 user_id 是否为空。
+    """
+
+    __tablename__ = "custom_prompts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 系统预设无归属用户，可空
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 流水线阶段：'polish' / 'enhance'
+    stage: Mapped[str] = mapped_column(String(50), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 同用户同阶段可有一个默认提示词（M2 接入流水线时消费）
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+
+class SavedSpec(Base):
+    """用户保存的排版规格（GLOSSARY：排版规格），Word Formatter 复用（M4 接入）。
+
+    spec_json 是排版规格的结构化 JSON 全文，格式由 Word Formatter 拥有，
+    本表只存取不解释。经 T5 迁移自旧库整行搬入。
+    """
+
+    __tablename__ = "saved_specs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500))
+    spec_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
