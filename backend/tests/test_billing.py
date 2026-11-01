@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app import billing
-from app.billing import BillingError, InsufficientBalance, InsufficientUsage
+from app.billing import BillingError, InsufficientBalance, InsufficientUsage, RefundConflict
 from app.models import LedgerEntry, User
 
 
@@ -191,6 +191,10 @@ def test_concurrent_refunds_take_effect_once(
             ok = billing.refund(s, funded_user.id, 500, task_id=202, reason="并发退款")
             s.commit()
             return ok
+        except RefundConflict:
+            # 竞争输掉（守卫检查后对方先提交）：响亮异常，事务整体放弃
+            s.rollback()
+            return False
         finally:
             s.close()
 
@@ -203,6 +207,43 @@ def test_concurrent_refunds_take_effect_once(
         r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND
     ]
     assert len(refund_rows) == 1
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_refund_race_after_prior_changes_raises_refund_conflict(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """同事务先 adjust 再 refund，refund 在唯一索引上竞争输掉时抛
+    RefundConflict——调用方被明确告知事务已失败，而不是像旧契约那样
+    静默回滚把先做的 adjust 一并吞掉。
+
+    竞争注入：SQLite 单写者下，带前置写的事务不可能输掉 flush 竞争（对手
+    拿不到写锁），故往同一未决事务塞一行守卫看不见的同 task 未冲账 refund
+    （autoflush=False 使其不进守卫查询），等价于对手在守卫之后、flush 之前
+    提交了退款，让 flush 撞上 ux_ledger_refund_once_per_task。
+    """
+    session = db_session_factory()
+    try:
+        billing.adjust_balance(session, funded_user.id, 1000, reason="客户补偿")
+        session.add(
+            LedgerEntry(
+                user_id=funded_user.id,
+                task_id=203,
+                kind=billing.KIND_REFUND,
+                amount_fen=500,
+                balance_after_fen=13000,
+                reason="对手并发退款",
+            )
+        )
+        with pytest.raises(RefundConflict):
+            billing.refund(session, funded_user.id, 500, task_id=203, reason="任务失败退款")
+        session.rollback()
+    finally:
+        session.close()
+
+    # 调用方回滚后：竞争双方的 refund 行都没有落库，余额回到起点
+    assert _balance(db_session_factory, funded_user.id) == 12500
+    assert [r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND] == []
     assert_ledger_reconciles(db_session_factory, funded_user.id)
 
 

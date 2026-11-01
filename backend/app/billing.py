@@ -22,10 +22,11 @@
 ## 退款幂等（崩溃重试不双倍退款）
 
 "已退款"状态持久化在账本里：部分唯一索引 ux_ledger_refund_once_per_task
-保证每个 task 至多一条 refund 行。refund 先查守卫（重复退款返回 False 而
-非报错），数据库唯一索引兜住并发竞争。因此 **refund 必须独占一个事务
-单元**：竞争失败方回滚整个事务来撤销已加的余额，调用方若在同一事务里
-先做过其他变动，会在竞争时一并丢失。
+保证每个 task 至多一条 refund 行。refund 先查守卫（对方的退款行在本事务
+可见时返回 False 而非报错），数据库唯一索引兜住并发竞争。竞争输掉（守卫
+检查之后对方才提交同 task 退款）时抛 :class:`RefundConflict`：本事务里
+可能已有调用方的其他未提交变动，refund 无权替调用方回滚（静默回滚会把这些
+变动一并吞掉），由调用方显式放弃整个事务。
 
 非资金错误（释放超过预留量、金额非正）按编程错误抛 ValueError，不设
 专门的恢复路径——调用方写错了就该当场炸出来。
@@ -55,6 +56,14 @@ class InsufficientBalance(BillingError):
 
 class InsufficientUsage(BillingError):
     """剩余次数不足以完成本次预留。"""
+
+
+class RefundConflict(BillingError):
+    """退款竞争输掉：对方在守卫检查之后提交了同 task 的退款。
+
+    本事务必须整体放弃（调用方回滚），不能只当作"已退过"继续提交——
+    事务里可能还有其他未提交变动，静默回滚会丢数据，响亮失败才安全。
+    """
 
 
 def ledger_balance_fen(session: Session, user_id: int) -> int:
@@ -137,8 +146,10 @@ def charge(session: Session, user_id: int, amount_fen: int, *, task_id: int, rea
 def refund(session: Session, user_id: int, amount_fen: int, *, task_id: int, reason: str) -> bool:
     """按 task 幂等退款（任务失败自动退款，GLOSSARY：预扣费）。
 
-    返回 True 表示本次调用完成了退款；False 表示该 task 已退过（幂等）。
-    amount_fen 必须为正且等于原扣减额。见模块级"退款幂等"一节的事务约束。
+    返回 True 表示本次调用完成了退款；False 表示该 task 已退过（幂等：
+    对方的退款行在本事务可见）。竞争输掉（守卫检查之后对方才提交）抛
+    RefundConflict，调用方须回滚整个事务。amount_fen 必须为正且等于原
+    扣减额。见模块级"退款幂等"一节。
     """
     if amount_fen <= 0:
         raise ValueError(f"refund amount must be positive, got {amount_fen}")
@@ -164,10 +175,10 @@ def refund(session: Session, user_id: int, amount_fen: int, *, task_id: int, rea
     try:
         session.flush()
     except IntegrityError:
-        # 并发竞争输掉 ux_ledger_refund_once_per_task：对方已退款。回滚
-        # 整个事务撤销本次加的余额，按幂等语义报告"已退过"。
-        session.rollback()
-        return False
+        # 并发竞争输掉 ux_ledger_refund_once_per_task：对方在守卫检查之后
+        # 提交了同 task 退款。本事务可能已有调用方的其他变动，refund 无权
+        # 静默回滚（会吞掉它们），响亮抛出让调用方决定整个事务的去留。
+        raise RefundConflict(f"task {task_id} 的退款已被并发请求完成") from None
     return True
 
 
