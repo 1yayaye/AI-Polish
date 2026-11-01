@@ -1,14 +1,50 @@
 import { useState, type FormEvent } from 'react'
 
 /**
- * 卡密输入页（占位）：M1/T2 将接入卡密认证 API（卡密只经请求头传递，绝不进 URL）。
- * 此页仅验证骨架构建链路与基础交互形态。
+ * 卡密输入页：输入卡密后经 X-Card-Key 请求头查询本人额度
+ * （卡密只走请求头，绝不进 URL，也不落任何日志可控的位置）。
  */
+
+interface Quota {
+  balance_fen: number
+  usage_remaining: number
+}
+
+function formatYuan(balanceFen: number): string {
+  return (balanceFen / 100).toFixed(2)
+}
+
 export default function App() {
   const [cardKey, setCardKey] = useState('')
+  const [quota, setQuota] = useState<Quota | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  function handleSubmit(_event: FormEvent<HTMLFormElement>) {
-    // 占位：T2 接入卡密登录后跳转工作台
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      const response = await fetch('/api/me/quota', {
+        headers: { 'X-Card-Key': cardKey.trim() },
+      })
+      if (response.status === 401) {
+        setError('卡密无效，请检查后重试')
+        setQuota(null)
+        return
+      }
+      if (!response.ok) {
+        setError('服务暂时不可用，请稍后重试')
+        setQuota(null)
+        return
+      }
+      setQuota((await response.json()) as Quota)
+    } catch {
+      setError('网络错误，请稍后重试')
+      setQuota(null)
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -25,10 +61,23 @@ export default function App() {
           autoComplete="off"
           required
         />
-        <button type="submit" disabled={cardKey.trim() === ''}>
-          进入
+        <button type="submit" disabled={cardKey.trim() === '' || loading}>
+          {loading ? '查询中…' : '进入'}
         </button>
       </form>
+      {error && <p className="error">{error}</p>}
+      {quota && (
+        <div className="quota">
+          <div className="quota-item">
+            <span className="quota-label">余额</span>
+            <span className="quota-value">¥{formatYuan(quota.balance_fen)}</span>
+          </div>
+          <div className="quota-item">
+            <span className="quota-label">剩余次数</span>
+            <span className="quota-value">{quota.usage_remaining} 次</span>
+          </div>
+        </div>
+      )}
     </main>
   )
 }

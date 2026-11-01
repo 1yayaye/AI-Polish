@@ -6,11 +6,14 @@
 
 from fastapi import FastAPI
 
+from app.api import router
+
 app = FastAPI(
     title="AI-Polish",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
+app.include_router(router)
 
 
 @app.get("/health")

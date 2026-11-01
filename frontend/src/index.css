@@ -63,3 +63,35 @@ body {
   background: #c3c9d4;
   cursor: not-allowed;
 }
+
+.error {
+  color: #d92d20;
+  margin-top: 1rem;
+}
+
+.quota {
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+  margin-top: 2rem;
+  padding: 20px;
+  background: #fff;
+  border: 1px solid #e4e7ec;
+  border-radius: 12px;
+}
+
+.quota-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quota-label {
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.quota-value {
+  font-size: 1.375rem;
+  font-weight: 600;
+}
