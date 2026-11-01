@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
   ApiError,
   MODE_LABELS,
@@ -10,6 +10,7 @@ import {
   formatYuan,
   getChanges,
   getQuota,
+  listSessions,
   type ChangeEntry,
   type Quota,
   type SessionView,
@@ -44,6 +45,23 @@ export default function Workspace({ cardKey, quota, onQuotaChange, onExit }: Pro
   const [submitting, setSubmitting] = useState(false)
 
   const { snapshot, connection, fatal } = useSessionStream(cardKey, session?.id ?? null)
+
+  // 刷新恢复：卡密已由 App 从 sessionStorage 还原，这里只差找回进行中的
+  // 会话——列表最新在前，取第一个 queued/running 的恢复为当前视图。
+  // 段落进度不落本地：SSE 从头建连后服务端 snapshot 补齐全量，
+  // 天然"从位置继续"。恢复失败不打断工作台，用户仍可提交新任务。
+  useEffect(() => {
+    let cancelled = false
+    listSessions(cardKey)
+      .then((sessions) => {
+        const active = sessions.find((s) => s.status === 'queued' || s.status === 'running')
+        if (!cancelled && active) setSession(active)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [cardKey])
 
   const refreshQuota = useCallback(async () => {
     try {

@@ -86,6 +86,15 @@ export function createSession(
   })
 }
 
+/**
+ * 本人全部会话（backend SessionSummaryOut，最新在前）：
+ * 字段即 SessionView 去掉 segments——刷新恢复只用于挑出活跃会话，
+ * 段落进度由 SSE snapshot 补齐，这里不重复承载。
+ */
+export function listSessions(cardKey: string): Promise<SessionView[]> {
+  return fetchJson<SessionView[]>('/api/optimization/sessions', cardKey)
+}
+
 export function cancelSession(cardKey: string, sessionId: number): Promise<SessionView> {
   return fetchJson<SessionView>(`/api/optimization/sessions/${sessionId}/cancel`, cardKey, {
     method: 'POST',
