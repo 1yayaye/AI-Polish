@@ -13,9 +13,9 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
 
 失败语义：
 - LLM 调用抛 :class:`app.llm.LLMError`（内容性错误，或瞬时错误重试耗尽）：
-  条件 UPDATE 置会话 failed，同事务走 :func:`billing.refund` 自动退款
-  （金额取 charged_fen；幂等与金额守卫由计费服务拥有）。条件 UPDATE 输给
-  并发取消（对方已置 cancelled 并退款）时不再退。
+  终态归属与全额退款走 :func:`optimization.finalize_with_refund`（条件
+  UPDATE 置会话 failed，同事务退 charged_fen；幂等与金额守卫由计费服务
+  拥有）。条件 UPDATE 输给并发取消（对方已置 cancelled 并退款）时不再退。
 - :class:`billing.RefundConflict` 与其余一切异常（编程错误、数据库故障）：
   单轮响亮失败——ERROR 级日志带栈显性记录（不吞），中断会话留在 running，
   其兜底退款与续跑语义由僵尸恢复协议唯一拥有（app.recovery 巡检）；常驻
@@ -40,7 +40,7 @@ from typing import Protocol
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import billing, optimization, seeds, stream
+from app import optimization, seeds, stream
 from app.db import short_tx
 from app.llm import LLMError
 from app.models import OptimizationSession, Segment, SegmentChangeLog
@@ -269,23 +269,19 @@ class PipelineWorker:
     def _fail(self, session_id: int, error: LLMError, *, stage: str, seq: int) -> None:
         """任务失败收场：running → failed + 自动退款，同一短事务。
 
+        终态归属与退款走 :func:`optimization.finalize_with_refund`；失败段
+        标记发生在归属赢定之后、同一短事务提交之前，原子性不变。
         RefundConflict 按计费契约原样冒泡（编程错误显性化，不吞不绕）。
         """
         with short_tx(self._session_factory) as session:
-            failed = (
-                session.execute(
-                    update(OptimizationSession)
-                    .where(
-                        OptimizationSession.id == session_id,
-                        OptimizationSession.status == optimization.SESSION_RUNNING,
-                    )
-                    .values(
-                        status=optimization.SESSION_FAILED, updated_at=func.current_timestamp()
-                    )
-                ).rowcount
-                == 1
+            owned = optimization.finalize_with_refund(
+                session,
+                session_id,
+                terminal_status=optimization.SESSION_FAILED,
+                from_statuses=(optimization.SESSION_RUNNING,),
+                reason=f"任务失败自动退款：{error}",
             )
-            if not failed:
+            if not owned:
                 return  # 并发取消抢先：对方已退款，本路径无权再动资金
             session.execute(
                 update(Segment)
@@ -295,17 +291,5 @@ class PipelineWorker:
                     Segment.seq == seq,
                 )
                 .values(status=optimization.SEGMENT_FAILED, updated_at=func.current_timestamp())
-            )
-            user_id, charged_fen = session.execute(
-                select(OptimizationSession.user_id, OptimizationSession.charged_fen).where(
-                    OptimizationSession.id == session_id
-                )
-            ).one()
-            billing.refund(
-                session,
-                user_id,
-                charged_fen,
-                task_id=session_id,
-                reason=f"任务失败自动退款：{error}",
             )
         stream.notify(session_id)

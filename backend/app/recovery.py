@@ -165,34 +165,20 @@ def patrol_once(
 def _abandon(session_factory: sessionmaker, session_id: int, *, reason: str) -> bool:
     """兜底收置一个会话：running → failed + 全额退款，同一短事务。
 
-    返回 True 表示本次完成收置；False 表示终态已被并发落定（对方已退款，
-    本路径无权再动资金）或退款竞争输掉（RefundConflict，告警日志显性记录，
-    事务整体回滚，会话留在 running 交由下一轮重试）。
+    终态归属与退款走 :func:`optimization.finalize_with_refund`。返回 True
+    表示本次完成收置；False 表示终态已被并发落定（对方已退款，本路径无权
+    再动资金）或退款竞争输掉（RefundConflict，告警日志显性记录，事务整体
+    回滚，会话留在 running 交由下一轮重试）。
     """
     try:
         with short_tx(session_factory) as session:
-            failed = (
-                session.execute(
-                    update(OptimizationSession)
-                    .where(
-                        OptimizationSession.id == session_id,
-                        OptimizationSession.status == optimization.SESSION_RUNNING,
-                    )
-                    .values(
-                        status=optimization.SESSION_FAILED,
-                        updated_at=func.current_timestamp(),
-                    )
-                ).rowcount
-                == 1
+            owned = optimization.finalize_with_refund(
+                session,
+                session_id,
+                terminal_status=optimization.SESSION_FAILED,
+                from_statuses=(optimization.SESSION_RUNNING,),
+                reason=reason,
             )
-            if not failed:
-                return False
-            user_id, charged_fen = session.execute(
-                select(OptimizationSession.user_id, OptimizationSession.charged_fen).where(
-                    OptimizationSession.id == session_id
-                )
-            ).one()
-            billing.refund(session, user_id, charged_fen, task_id=session_id, reason=reason)
     except billing.RefundConflict as exc:
         # 计费契约：竞争输掉必须整体放弃事务（short_tx 已回滚）。兜底路径
         # 不因此崩溃——响亮记录后放弃，下一轮巡检重试（幂等退款守卫兜底）。
@@ -202,6 +188,8 @@ def _abandon(session_factory: sessionmaker, session_id: int, *, reason: str) -> 
             session_id,
             exc,
         )
+        return False
+    if not owned:
         return False
     logger.warning("会话 %d 兜底退款：%s", session_id, reason)
     stream.notify(session_id)

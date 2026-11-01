@@ -46,6 +46,49 @@ SESSION_CANCELLED = "cancelled"
 # 取消只允许未终态的会话（终态：completed/failed/cancelled）
 _CANCELLABLE = (SESSION_QUEUED, SESSION_RUNNING)
 
+
+def finalize_with_refund(
+    session: Session,
+    session_id: int,
+    *,
+    terminal_status: str,
+    from_statuses: tuple[str, ...],
+    reason: str,
+) -> bool:
+    """终态收场原语：条件 UPDATE 抢终态归属，赢得后同一事务内全额退 charged_fen。
+
+    worker._fail / recovery._abandon / cancel_session 三处共用的编排。调用方
+    传入处于短事务中的 Session（app.db 纪律），状态词表归调用方所有——本函数
+    不 import 任何状态常量，避免与调用方成环。
+
+    返回 False = 归属输掉（对方已落终态并退款），本路径不碰任何资金；
+    返回 True = 终态归属与全额退款（charged_fen 取自会话行，与原 charge 行
+    必等额）都由本次调用完成。refund 幂等返回 False（对方的退款行在本事务
+    可见）时终态照常落定、本函数照常返回 True——钱已由对方退回，不得再退。
+    :class:`billing.RefundConflict` 按计费契约原样冒泡，调用方须整体放弃
+    事务（short_tx 回滚）。
+    """
+    hit = (
+        session.execute(
+            update(OptimizationSession)
+            .where(
+                OptimizationSession.id == session_id,
+                OptimizationSession.status.in_(from_statuses),
+            )
+            .values(status=terminal_status, updated_at=func.current_timestamp())
+        ).rowcount
+        == 1
+    )
+    if not hit:
+        return False
+    user_id, charged_fen = session.execute(
+        select(OptimizationSession.user_id, OptimizationSession.charged_fen).where(
+            OptimizationSession.id == session_id
+        )
+    ).one()
+    billing.refund(session, user_id, charged_fen, task_id=session_id, reason=reason)
+    return True
+
 SEGMENT_PENDING = "pending"
 SEGMENT_COMPLETED = "completed"
 SEGMENT_FAILED = "failed"
@@ -172,11 +215,12 @@ def create_session(session: Session, user: User, *, text: str, mode: str) -> Opt
 def cancel_session(session: Session, user: User, session_id: int) -> OptimizationSession:
     """取消未完成会话并自动退款（spec #15 用户故事 3）。
 
-    仅 queued/running 可取消：条件原子 UPDATE 守住与 Worker/失败路径的
-    并发竞争，输掉（对方先到终态）抛 :class:`SessionNotCancellable`。
-    退款走 :func:`app.billing.refund`：金额取创建时的 charged_fen（与
-    原 charge 行必等额，#13 守卫因此恒通过）。竞争输掉退款（对方已退款，
-    幂等返回 False）时本会话仍置 cancelled——钱已退回，取消照常成立。
+    仅 queued/running 可取消：终态归属与退款走 :func:`finalize_with_refund`
+    的条件原子 UPDATE，守住与 Worker/失败路径的并发竞争。归属输掉（对方
+    先到终态并退款）抛 :class:`SessionNotCancellable`（409）；退款竞争输掉
+    （:class:`billing.RefundConflict`，对方已退款、本事务必须整体放弃）同样
+    映射 :class:`SessionNotCancellable`——钱已由赢家退回，会话回到可取消态，
+    对外与"已不可取消"同型（409），不是 500。
     """
     row = session.execute(
         select(OptimizationSession).where(
@@ -185,17 +229,18 @@ def cancel_session(session: Session, user: User, session_id: int) -> Optimizatio
     ).scalar_one_or_none()
     if row is None:
         raise SessionNotFound(f"会话 {session_id} 不存在")
-    hit = session.execute(
-        update(OptimizationSession)
-        .where(
-            OptimizationSession.id == session_id,
-            OptimizationSession.status.in_(_CANCELLABLE),
+    try:
+        owned = finalize_with_refund(
+            session,
+            session_id,
+            terminal_status=SESSION_CANCELLED,
+            from_statuses=_CANCELLABLE,
+            reason="会话取消退款",
         )
-        .values(status=SESSION_CANCELLED, updated_at=func.current_timestamp())
-    ).rowcount
-    if hit != 1:
+    except billing.RefundConflict as exc:
+        raise SessionNotCancellable("会话已被并发收置为终态") from exc
+    if not owned:
         raise SessionNotCancellable(f"会话 {session_id} 已完成或已取消")
-    billing.refund(session, user.id, row.charged_fen, task_id=row.id, reason="会话取消退款")
     session.refresh(row)
     return row
 

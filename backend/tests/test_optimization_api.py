@@ -22,6 +22,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app import billing, optimization  # noqa: E402
+from app.db import short_tx  # noqa: E402
 from test_billing import assert_ledger_reconciles  # noqa: E402
 
 # 10000 个非空白字符：恰好一个"万字"，polish 定价 300 分（见 _PRICE_FEN_PER_10K）
@@ -74,6 +75,20 @@ def _balance_fen(db_session_factory: sessionmaker, user_id: int) -> int:
     session = db_session_factory()
     try:
         return session.execute(select(User.balance_fen).where(User.id == user_id)).scalar_one()
+    finally:
+        session.close()
+
+
+def _refund_rows(db_session_factory: sessionmaker, task_id: int) -> list[LedgerEntry]:
+    session = db_session_factory()
+    try:
+        return list(
+            session.execute(
+                select(LedgerEntry).where(
+                    LedgerEntry.task_id == task_id, LedgerEntry.kind == billing.KIND_REFUND
+                )
+            ).scalars()
+        )
     finally:
         session.close()
 
@@ -354,3 +369,69 @@ def test_cancel_other_users_session_is_invisible_and_unrefunded(
     assert _balance_fen(db_session_factory, stranger.id) == 5000
     assert _balance_fen(db_session_factory, owner.id) == 5000 - 1  # 预扣未退
     assert_ledger_reconciles(db_session_factory, owner.id)
+
+
+def test_cancel_refund_conflict_maps_409_and_rolls_back_to_cancellable(
+    client: TestClient,
+    funded_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """退款竞争输掉（RefundConflict）≠ 500：对方已并发落终态并退款，本取消
+    输掉——事务整体回滚（cancelled 不提交），对外与"已不可取消"同型 409，
+    会话回到 cancellable 态，资金状态与对方退款后的事实一致（钱只退一次）。
+    """
+    user = funded_user(card_key="card-cancel-conflict", balance_fen=5000)
+    headers = {"X-Card-Key": user.card_key}
+    created = client.post(
+        "/api/optimization/sessions",
+        json={"text": "第一段。", "mode": "paper_polish"},
+        headers=headers,
+    ).json()
+    balance_after_charge = _balance_fen(db_session_factory, user.id)
+
+    def conflict(*_args: object, **_kwargs: object) -> bool:
+        raise billing.RefundConflict("注入：并发退款竞争输掉")
+
+    monkeypatch.setattr(billing, "refund", conflict)
+
+    response = client.post(f"/api/optimization/sessions/{created['id']}/cancel", headers=headers)
+
+    assert response.status_code == 409
+    # 事务回滚：会话行仍是 queued（cancellable），零退款行，余额未被本路径触碰
+    assert _session_rows(db_session_factory)[0].status == "queued"
+    assert _refund_rows(db_session_factory, created["id"]) == []
+    assert _balance_fen(db_session_factory, user.id) == balance_after_charge
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_finalize_with_refund_loses_ownership_without_touching_ledger(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    """终态收场原语的归属守卫：状态已被并发落定为 completed 时返回 False
+    且账本零写入（输家无权再动资金）。"""
+    user = funded_user(card_key="card-finalize", balance_fen=5000)
+    session = db_session_factory()
+    try:
+        row = optimization.create_session(session, user, text="第一段。", mode="paper_polish")
+        session.commit()
+        session.refresh(row)
+        row.status = optimization.SESSION_COMPLETED  # 模拟对方（Worker）已落终态
+        session.commit()
+        session_id = row.id
+    finally:
+        session.close()
+
+    with short_tx(db_session_factory) as tx:
+        owned = optimization.finalize_with_refund(
+            tx,
+            session_id,
+            terminal_status=optimization.SESSION_FAILED,
+            from_statuses=(optimization.SESSION_RUNNING,),
+            reason="注入：归属输掉路径",
+        )
+
+    assert owned is False
+    assert _refund_rows(db_session_factory, session_id) == []
+    assert _balance_fen(db_session_factory, user.id) == 5000 - 1  # 预扣原样在账
+    assert_ledger_reconciles(db_session_factory, user.id)
