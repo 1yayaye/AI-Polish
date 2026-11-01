@@ -111,3 +111,13 @@ def admin_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "admin_username", ADMIN_USERNAME)
     monkeypatch.setattr(settings, "admin_password", ADMIN_PASSWORD)
     monkeypatch.setattr(settings, "jwt_secret", "test-jwt-secret-0123456789abcdef0123456789abcdef")
+
+
+@pytest.fixture()
+def logged_in_client(client: TestClient, admin_credentials: None) -> Iterator[TestClient]:
+    response = client.post(
+        "/api/admin/login",
+        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    yield client

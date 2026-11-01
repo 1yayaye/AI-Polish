@@ -9,7 +9,9 @@
 短事务纪律），由 T4 计费服务统一收口，禁止绕过。
 """
 
-from sqlalchemy import Integer, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -31,3 +33,43 @@ class User(Base):
     @property
     def usage_remaining(self) -> int:
         return self.usage_limit - self.usage_used
+
+
+class LedgerEntry(Base):
+    """账本：余额与次数全部变动的流水（GLOSSARY：账本），每笔变动一行。
+
+    - amount_fen 为带符号增量（扣减为负、充值/退款为正），因此
+      SUM(amount_fen) == 该用户当前余额 恒成立——对账与迁移硬校验
+      （spec #3 用户故事 10）都依赖这一条；次数轨变动 amount_fen 为 0。
+    - usage_after 仅次数轨变动（usage_reserve/usage_release）非空，
+      记录变动后的剩余次数。
+    - task_id 无外键且可空：账本行要先于会话表存在，旧账本迁入不因缺
+      旧会话而断裂（rewrite-plan §5）；新流水一律携带 task_id。
+    - kind/amount/balance_after 的合法取值由 app.billing（计费服务）唯一
+      拥有；其他模块只读，禁止直接写本表。
+    """
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    task_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    amount_fen: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after_fen: Mapped[int] = mapped_column(Integer, nullable=False)
+    usage_after: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+    __table_args__ = (
+        # 退款状态守卫：每个 task 至多一条 refund 行，重复退款被数据库拒绝。
+        # billing.refund 的幂等语义依赖此约束（含并发竞争的最终防线）。
+        Index(
+            "ux_ledger_refund_once_per_task",
+            "task_id",
+            unique=True,
+            sqlite_where=text("kind = 'refund' AND task_id IS NOT NULL"),
+        ),
+    )

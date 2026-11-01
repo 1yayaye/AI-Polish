@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import billing
+from app.billing import InsufficientBalance
 from app.config import settings
 from app.db import get_session
 from app.models import User
@@ -126,17 +128,19 @@ def create_card_keys(
     _admin: str = Depends(get_current_admin),
     session: Session = Depends(get_session),
 ) -> CardKeyBatchResponse:
-    users = [
-        User(
-            card_key=_generate_card_key(session),
-            balance_fen=body.balance_fen,
-            usage_limit=body.usage_limit,
-            usage_used=0,
-        )
-        for _ in range(body.count)
-    ]
+    # 用户行以零额度创建，初始双轨额度统一走计费服务入账（发卡即充值，
+    # 落账本后 SUM(账本)==余额 对新卡同样成立，见 app.billing.grant_initial_quota）。
+    users = [User(card_key=_generate_card_key(session)) for _ in range(body.count)]
     session.add_all(users)
-    session.flush()  # 生成主键后回读落库值
+    session.flush()  # 生成主键后计费服务才能入账
+    for user in users:
+        billing.grant_initial_quota(
+            session,
+            user.id,
+            balance_fen=body.balance_fen,
+            usage_count=body.usage_limit,
+            reason="发卡初始额度",
+        )
     return CardKeyBatchResponse(
         card_keys=[
             IssuedCardKey(card_key=u.card_key, balance_fen=u.balance_fen, usage_limit=u.usage_limit)
@@ -177,3 +181,37 @@ def list_users(
         )
         for u in users
     ]
+
+
+class BalanceAdjustRequest(BaseModel):
+    """充值/调整余额：delta_fen 为正即充值，为负即扣减调整，不允许为 0。"""
+
+    delta_fen: int
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class BalanceAdjustResponse(BaseModel):
+    user_id: int
+    balance_fen: int
+
+
+@router.post("/users/{user_id}/balance")
+def adjust_user_balance(
+    user_id: int,
+    body: BalanceAdjustRequest,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> BalanceAdjustResponse:
+    """运营商充值/调整余额。全部变动经计费服务落账本（带原因），
+    用户端额度接口下一次读取即见新值。"""
+    if body.delta_fen == 0:
+        raise HTTPException(422, detail="delta_fen 不允许为 0")
+    if session.get(User, user_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    try:
+        balance_fen = billing.adjust_balance(session, user_id, body.delta_fen, reason=body.reason)
+    except InsufficientBalance:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail="余额不足，无法完成本次扣减调整"
+        ) from None
+    return BalanceAdjustResponse(user_id=user_id, balance_fen=balance_fen)

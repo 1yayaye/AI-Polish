@@ -5,7 +5,6 @@
 （进 URL 会落入 Nginx 访问日志，rewrite-plan §5）。
 """
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -16,16 +15,6 @@ from app.models import User
 from tests.conftest import ADMIN_PASSWORD, ADMIN_USERNAME
 
 COOKIE_NAME = "admin_session"
-
-
-@pytest.fixture()
-def logged_in_client(client: TestClient, admin_credentials: None) -> Iterator[TestClient]:
-    response = client.post(
-        "/api/admin/login",
-        json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
-    )
-    assert response.status_code == 200, response.text
-    yield client
 
 
 def login(client: TestClient, username: str, password: str) -> Any:
