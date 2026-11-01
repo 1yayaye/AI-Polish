@@ -215,21 +215,28 @@ def grant_initial_quota(
 
     用户行创建时资金字段恒为零，全部资金由此入账——"users 的资金字段只在
     计费服务内变动"因此无例外成立。写一行 issue 账本同时覆盖两轨。
+
+    双轨两列在**同一条**条件 UPDATE 内落库：任一守卫不满足则整句不命中，
+    不会出现"余额已入账、次数未入账"的部分态悬在事务里等调用方回滚。
+    失败路径只读回查用户行，把三种失败原因区分给调用方。
     """
     if balance_fen < 0 or usage_count < 0:
         raise ValueError("initial quota must be non-negative")
-    if session.execute(
-        update(User)
-        .where(User.id == user_id, User.balance_fen == 0)
-        .values(balance_fen=balance_fen)
-    ).rowcount != 1:
-        raise BillingError(f"发卡入账失败：用户 {user_id} 不存在或余额已非零")
-    if session.execute(
-        update(User)
-        .where(User.id == user_id, User.usage_limit == 0, User.usage_used == 0)
-        .values(usage_limit=usage_count)
-    ).rowcount != 1:
-        raise BillingError(f"发卡入账失败：用户 {user_id} 次数额度已非零")
+    granted = (
+        session.execute(
+            update(User)
+            .where(
+                User.id == user_id,
+                User.balance_fen == 0,
+                User.usage_limit == 0,
+                User.usage_used == 0,
+            )
+            .values(balance_fen=balance_fen, usage_limit=usage_count)
+        ).rowcount
+        == 1
+    )
+    if not granted:
+        raise BillingError(f"发卡入账失败：{_initial_grant_failure(session, user_id)}")
     _append(
         session,
         user_id,
@@ -240,6 +247,16 @@ def grant_initial_quota(
         reason=reason,
         usage_after=usage_count,
     )
+
+
+def _initial_grant_failure(session: Session, user_id: int) -> str:
+    """只读诊断 grant_initial_quota 守卫失败的具体原因（失败路径不写库）。"""
+    user = session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if user is None:
+        return f"用户 {user_id} 不存在"
+    if user.balance_fen != 0:
+        return f"用户 {user_id} 余额已非零"
+    return f"用户 {user_id} 次数额度已非零"
 
 
 def _adjust_usage(

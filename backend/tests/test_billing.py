@@ -344,6 +344,52 @@ def test_reserve_rejects_insufficient_usage(
 # ---- 入账与对账 ----
 
 
+def test_grant_initial_quota_failure_leaves_no_partial_state_on_commit(
+    db_session_factory: sessionmaker, make_user: Callable[..., User]
+) -> None:
+    """守卫失败后即使调用方不回滚、直接 commit，也无任何部分态落库。
+
+    复现 #12 的原始缺陷场景：余额轨通过、次数轨失败（usage_used 已非零），
+    旧实现会把余额 UPDATE 留在事务里，调用方一 commit 就凭空造钱（无账本行）。
+    """
+    user = make_user(card_key="card-used", usage_used=5)
+    session = db_session_factory()
+    try:
+        with pytest.raises(BillingError, match="次数额度已非零"):
+            billing.grant_initial_quota(
+                session, user.id, balance_fen=2000, usage_count=10, reason="发卡初始额度"
+            )
+        session.commit()  # 调用方违反回滚纪律，也不允许产生部分态
+    finally:
+        session.close()
+
+    session = db_session_factory()
+    try:
+        balance_fen, usage_limit, usage_used = session.execute(
+            select(User.balance_fen, User.usage_limit, User.usage_used).where(
+                User.id == user.id
+            )
+        ).one()
+    finally:
+        session.close()
+    assert (balance_fen, usage_limit, usage_used) == (0, 0, 5)
+    assert _ledger(db_session_factory, user.id) == []
+
+
+def test_grant_initial_quota_reports_unknown_user(
+    db_session_factory: sessionmaker,
+) -> None:
+    session = db_session_factory()
+    try:
+        with pytest.raises(BillingError, match="不存在"):
+            billing.grant_initial_quota(
+                session, 99999, balance_fen=100, usage_count=1, reason="发卡初始额度"
+            )
+        session.rollback()
+    finally:
+        session.close()
+
+
 def test_grant_initial_quota_writes_issue_row(
     db_session_factory: sessionmaker, make_user: Callable[..., User]
 ) -> None:
