@@ -3,7 +3,8 @@ pytest 只会把 backend/tests 加进 sys.path；这里补上 backend/ 使 `impo
 
 测试接缝：HTTP API（TestClient + 临时 SQLite 文件），符合 spec 的测试决策——
 只测外部行为（状态码、返回的额度），不测内部调用结构。每个测试拿到独立的
-临时库：先跑 Alembic 迁移建表，再把应用的 get_session 依赖覆盖到该库。
+临时库：先跑 Alembic 迁移建表，再把 app.db.SessionLocal 指到该库——请求的
+提交/回滚协议始终只有 get_session 一份（生产同款），测试不复制事务边界。
 """
 
 import sys
@@ -15,14 +16,15 @@ import alembic.config
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app import db as app_db  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.db import create_db_engine, get_session  # noqa: E402
+from app.db import create_db_engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import User  # noqa: E402
 
@@ -58,23 +60,12 @@ def db_session_factory(db_engine: Engine) -> sessionmaker:
 
 
 @pytest.fixture()
-def client(db_session_factory: sessionmaker) -> Iterator[TestClient]:
-    session_factory = db_session_factory
-
-    def _override_session() -> Iterator[Session]:
-        session = session_factory()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_session] = _override_session
+def client(db_session_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """把 app.db.SessionLocal 换成测试库的 session 工厂：get_session 依赖保持
+    原样（它每次调用都从 app.db 模块取 SessionLocal），提交/回滚协议与生产
+    同源，不会在测试里悄悄分叉。"""
+    monkeypatch.setattr(app_db, "SessionLocal", db_session_factory)
     yield TestClient(app)
-    app.dependency_overrides.pop(get_session, None)
 
 
 @pytest.fixture()
