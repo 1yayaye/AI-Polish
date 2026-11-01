@@ -1,18 +1,12 @@
 import { useState, type FormEvent } from 'react'
+import Workspace from './Workspace'
+import type { Quota } from './api'
 
 /**
  * 卡密输入页：输入卡密后经 X-Card-Key 请求头查询本人额度
  * （卡密只走请求头，绝不进 URL，也不落任何日志可控的位置）。
+ * 验证通过进入工作台。
  */
-
-interface Quota {
-  balance_fen: number
-  usage_remaining: number
-}
-
-function formatYuan(balanceFen: number): string {
-  return (balanceFen / 100).toFixed(2)
-}
 
 export default function App() {
   const [cardKey, setCardKey] = useState('')
@@ -47,6 +41,20 @@ export default function App() {
     }
   }
 
+  if (quota !== null) {
+    return (
+      <Workspace
+        cardKey={cardKey.trim()}
+        quota={quota}
+        onQuotaChange={setQuota}
+        onExit={() => {
+          setQuota(null)
+          setCardKey('')
+        }}
+      />
+    )
+  }
+
   return (
     <main className="entry">
       <h1>AI-Polish 学术写作助手</h1>
@@ -66,18 +74,6 @@ export default function App() {
         </button>
       </form>
       {error && <p className="error">{error}</p>}
-      {quota && (
-        <div className="quota">
-          <div className="quota-item">
-            <span className="quota-label">余额</span>
-            <span className="quota-value">¥{formatYuan(quota.balance_fen)}</span>
-          </div>
-          <div className="quota-item">
-            <span className="quota-label">剩余次数</span>
-            <span className="quota-value">{quota.usage_remaining} 次</span>
-          </div>
-        </div>
-      )}
     </main>
   )
 }

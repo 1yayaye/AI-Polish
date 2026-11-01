@@ -23,6 +23,10 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
 LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方法 +
 ``model_name``），生产接 :class:`app.llm.PolishLLMClient`，测试接脚本化假
 客户端——流水线测试不 mock 内部函数。
+
+进度可见：每个状态变更短事务提交后经 :func:`app.stream.notify` 叫醒该会话
+的 SSE 进度流（通知不携带数据，流被唤醒后重读数据库推导事件——通知丢了
+也不丢进度，见 app.stream）。
 """
 
 import asyncio
@@ -34,7 +38,7 @@ from typing import Protocol
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import billing, optimization, seeds
+from app import billing, optimization, seeds, stream
 from app.llm import LLMError
 from app.models import OptimizationSession, Segment, SegmentChangeLog
 
@@ -133,7 +137,11 @@ class PipelineWorker:
                 == 1
             )
             # 守卫失败 = 并发取消抢先置 cancelled：本 Worker 不碰它
-            return (row.id, row.mode) if claimed else None
+            if not claimed:
+                return None
+        # 短事务已提交才通知进度流（app.stream）：唤醒后重读库，通知丢了也不丢状态
+        stream.notify(row.id)
+        return (row.id, row.mode)
 
     async def _process(self, session_id: int, mode: str) -> None:
         stages = optimization.stages_for_mode(mode)
@@ -226,6 +234,7 @@ class PipelineWorker:
                     after_text=result,
                 )
             )
+        stream.notify(session_id)
 
     def _complete(self, session_id: int) -> None:
         with self._short_tx() as session:
@@ -239,6 +248,7 @@ class PipelineWorker:
                     status=optimization.SESSION_COMPLETED, updated_at=func.current_timestamp()
                 )
             )
+        stream.notify(session_id)
 
     def _fail(self, session_id: int, error: LLMError, *, stage: str, seq: int) -> None:
         """任务失败收场：running → failed + 自动退款，同一短事务。
@@ -282,3 +292,4 @@ class PipelineWorker:
                 task_id=session_id,
                 reason=f"任务失败自动退款：{error}",
             )
+        stream.notify(session_id)

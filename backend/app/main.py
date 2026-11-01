@@ -16,6 +16,7 @@ from app.admin import router as admin_router
 from app.api import router
 from app.llm import PolishLLMClient
 from app.optimization import router as optimization_router
+from app.stream import router as stream_router
 from app.worker import PipelineWorker
 
 
@@ -48,6 +49,7 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(admin_router)
 app.include_router(optimization_router)
+app.include_router(stream_router)
 
 
 @app.get("/health")

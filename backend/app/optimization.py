@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from app import billing
 from app.auth import get_current_user
 from app.db import get_session
-from app.models import OptimizationSession, Segment, User
+from app.models import OptimizationSession, Segment, SegmentChangeLog, User
 
 router = APIRouter(prefix="/api/optimization")
 
@@ -262,8 +262,12 @@ def _to_summary(row: OptimizationSession) -> SessionSummaryOut:
     )
 
 
-# 段落展示顺序：润色阶段先于增强阶段（字典序相反，显式排序）
-_STAGE_ORDER = case((Segment.stage == STAGE_ENHANCE, 1), else_=0)
+# 段落展示顺序：润色阶段先于增强阶段（字典序相反，显式排序）。
+# 段落表与变更记录表共用这一排序契约，由 _stage_order_for 施加到各自的 stage 列。
+
+
+def _stage_order_for(column):  # type: ignore[no-untyped-def]
+    return case((column == STAGE_ENHANCE, 1), else_=0)
 
 
 def _session_out(session: Session, row: OptimizationSession) -> SessionOut:
@@ -271,7 +275,7 @@ def _session_out(session: Session, row: OptimizationSession) -> SessionOut:
     segments = session.execute(
         select(Segment)
         .where(Segment.session_id == row.id)
-        .order_by(_STAGE_ORDER, Segment.seq)
+        .order_by(_stage_order_for(Segment.stage), Segment.seq)
     ).scalars()
     return SessionOut(
         id=row.id,
@@ -333,3 +337,34 @@ def cancel_my_session(
     except SessionNotCancellable as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return _session_out(session, row)
+
+
+class ChangeOut(BaseModel):
+    """一段变更记录（GLOSSARY）：before 是该次调用实际发给 LLM 的输入。"""
+
+    stage: str
+    seq: int
+    before_text: str
+    after_text: str
+
+
+@router.get("/sessions/{session_id}/changes", response_model=list[ChangeOut])
+def my_session_changes(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> list[ChangeOut]:
+    """本人会话的全部段落变更记录（spec #15 用户故事 10），润色段在前。"""
+    try:
+        row = get_session_detail(session, user, session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    logs = session.execute(
+        select(SegmentChangeLog)
+        .where(SegmentChangeLog.session_id == row.id)
+        .order_by(_stage_order_for(SegmentChangeLog.stage), SegmentChangeLog.seq)
+    ).scalars()
+    return [
+        ChangeOut(stage=log.stage, seq=log.seq, before_text=log.before_text, after_text=log.after_text)
+        for log in logs
+    ]
