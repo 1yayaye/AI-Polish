@@ -15,6 +15,7 @@
 
 from .docx_text import extract_text_from_docx
 from .format_checker import (
+    PARAGRAPH_TYPES,
     CheckMode,
     FormatCheckResult,
     FormatChecker,
@@ -43,6 +44,7 @@ __all__ = [
     "FormatIssue",
     "IssueSeverity",
     "IssueType",
+    "PARAGRAPH_TYPES",
     "check_format",
     "extract_text_from_docx",
 ]

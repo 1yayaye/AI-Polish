@@ -311,6 +311,71 @@ export function downloadJobOutput(
   return downloadBlob(`/api/word-formatter/jobs/${jobId}/download`, cardKey, filename)
 }
 
+// ---- 格式检查（backend/app/word_check.py 的端点，issue #37） ----
+
+/** 检查档位：宽松只报 ERROR 级，严格报全部问题。 */
+export type CheckMode = 'loose' | 'strict'
+
+/** 段落类型字典条目（GET /format-check/types）：检查结果与标记文本的术语表。 */
+export interface ParagraphTypeView {
+  type: string
+  label: string
+}
+
+/** 单条格式问题：行号定位 + 严重度分级 + 问题类型（页面按行号排明细）。 */
+export interface FormatIssueView {
+  line: number
+  paragraph_index: number
+  issue_type: string
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  suggestion: string
+  content_preview: string
+}
+
+/** 检查结果（同步免费：不创建任务、不耗次数）。 */
+export interface FormatCheckResultView {
+  is_valid: boolean
+  mode: string
+  issues: FormatIssueView[]
+  type_statistics: Record<string, number>
+}
+
+/** 段落类型字典与说明（检查结果术语的唯一数据源）。 */
+export function getFormatCheckTypes(cardKey: string): Promise<ParagraphTypeView[]> {
+  return fetchJson<{ types: ParagraphTypeView[] }>(
+    '/api/word-formatter/format-check/types',
+    cardKey,
+  ).then((body) => body.types)
+}
+
+export function checkFormatText(
+  cardKey: string,
+  text: string,
+  mode: CheckMode,
+): Promise<FormatCheckResultView> {
+  return fetchJson<FormatCheckResultView>('/api/word-formatter/format-check/text', cardKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, mode }),
+  })
+}
+
+/** 上传检查：解码（GBK 回落）与 docx 提文本都在服务端，这里只交原文件。 */
+export function checkFormatFile(
+  cardKey: string,
+  file: File,
+  mode: CheckMode,
+): Promise<FormatCheckResultView> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('mode', mode)
+  return fetchJson<FormatCheckResultView>('/api/word-formatter/format-check/file', cardKey, {
+    method: 'POST',
+    body: form,
+  })
+}
+
 // ---- 排版规格（backend/app/word_specs.py 的端点，issue #36） ----
 
 /** AI 生成响应：spec_json 是规格 JSON 全文（保存与送格式化的直接输入）。 */
@@ -448,6 +513,26 @@ export const PARAGRAPH_TYPE_LABELS: Record<string, string> = {
   acknowledgement: '致谢',
   figure_caption: '图题',
   table_caption: '表题',
+}
+
+/** 问题严重度分级（backend IssueSeverity）：宽松档只报 error。 */
+export const ISSUE_SEVERITY_LABELS: Record<string, string> = {
+  error: '错误',
+  warning: '警告',
+  info: '提示',
+}
+
+/** 问题类型文案（backend IssueType）。 */
+export const ISSUE_TYPE_LABELS: Record<string, string> = {
+  heading_skip: '标题层级跳跃',
+  heading_duplicate: '重复标题层级',
+  missing_abstract: '缺少摘要',
+  missing_keywords: '缺少关键词',
+  invalid_list: '无效列表格式',
+  empty_paragraph: '空段落',
+  long_paragraph: '段落过长',
+  reference_format: '参考文献格式问题',
+  existing_marker: '已有段落标记',
 }
 
 export function formatYuan(balanceFen: number): string {

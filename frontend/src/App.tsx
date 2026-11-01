@@ -4,6 +4,7 @@ import UserShell from './UserShell'
 import WordFormatterPage from './word/WordFormatterPage'
 import ArticlePreprocessorPage from './word/ArticlePreprocessorPage'
 import SpecGeneratorPage from './word/SpecGeneratorPage'
+import FormatCheckerPage from './word/FormatCheckerPage'
 import Workspace from './Workspace'
 import { ApiError, getQuota, type Quota } from './api'
 
@@ -120,7 +121,6 @@ export default function App() {
             path="word"
             element={<WordFormatterPage cardKey={userKey} refreshQuota={refreshQuota} />}
           />
-          {/* 格式检查页由 #37 替换占位 */}
           <Route
             path="word/specs"
             element={<SpecGeneratorPage cardKey={userKey} refreshQuota={refreshQuota} />}
@@ -129,7 +129,7 @@ export default function App() {
             path="word/preprocess"
             element={<ArticlePreprocessorPage cardKey={userKey} refreshQuota={refreshQuota} />}
           />
-          <Route path="word/check" element={<PlaceholderPage title="格式检查" />} />
+          <Route path="word/check" element={<FormatCheckerPage cardKey={userKey} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </UserShell>
@@ -155,18 +155,6 @@ export default function App() {
         </button>
       </form>
       {error && <p className="error">{error}</p>}
-    </main>
-  )
-}
-
-/** 后续票（#35/#36/#37）的页面占位：路由先挂进骨架，功能票各自替换。 */
-function PlaceholderPage({ title }: { title: string }) {
-  return (
-    <main className="workspace">
-      <section className="panel">
-        <h2>{title}</h2>
-        <p className="hint">该功能即将开放，敬请期待。</p>
-      </section>
     </main>
   )
 }
