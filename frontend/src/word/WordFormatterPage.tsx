@@ -1,14 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   ApiError,
   JOB_PHASE_LABELS,
-  JOB_STATUS_LABELS,
   JOB_TYPE_LABELS,
   createFormatFileJob,
   createFormatTextJob,
   deleteJob,
   downloadJobOutput,
   getBuiltinSpecs,
+  jobStatusLabel,
   listJobs,
   type JobView,
 } from '../api'
@@ -20,6 +21,9 @@ import { useJobStream } from '../useJobStream'
  * 封面/目录开关 → 提交排版任务 → SSE 实时进度 → blob 下载（header 认证）；
  * 任务列表可删除终态任务、找回进行中任务。剩余次数在外壳头部展示，创建
  * 预扣与失败退次后经 refreshQuota 刷新，与账本保持一致。
+ *
+ * 文章预处理页（issue #35）经路由 state 送来的标记文本直接进文本框，并按
+ * marked 输入提交（保留 wf:type 结构标记，衔接与旧版一致）。
  */
 
 const ACCEPT = '.txt,.md,.docx'
@@ -30,7 +34,12 @@ interface Props {
 }
 
 export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
-  const [text, setText] = useState('')
+  const location = useLocation()
+  const preprocessedText: string | null = location.state?.preprocessedText ?? null
+  // 送来的标记文本必须按 marked 输入渲染（保留 wf:type 标记）；本次挂载内
+  // 不变，无需状态。
+  const inputFormat: 'auto' | 'marked' = preprocessedText ? 'marked' : 'auto'
+  const [text, setText] = useState(preprocessedText ?? '')
   const [file, setFile] = useState<File | null>(null)
   const [specs, setSpecs] = useState<string[]>([])
   const [specName, setSpecName] = useState('')
@@ -43,8 +52,9 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
 
   const { job: streamJob, connection, fatal } = useJobStream(cardKey, watchingId)
 
-  // 首次进入：拉内置规格与任务列表；列表里有进行中任务就恢复为当前视图
-  // （进度不落本地，SSE 从头建连后服务端 snapshot 补齐全量）。
+  // 首次进入：拉内置规格与任务列表（只看格式化任务，预处理任务归预处理页）；
+  // 列表里有进行中任务就恢复为当前视图（进度不落本地，SSE 从头建连后服务端
+  // snapshot 补齐全量）。
   useEffect(() => {
     let cancelled = false
     getBuiltinSpecs(cardKey)
@@ -57,8 +67,9 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
     listJobs(cardKey)
       .then((rows) => {
         if (cancelled) return
-        setJobs(rows)
-        const active = rows.find((j) => j.status === 'queued' || j.status === 'running')
+        const mine = rows.filter((j) => j.job_type === 'format')
+        setJobs(mine)
+        const active = mine.find((j) => j.status === 'queued' || j.status === 'running')
         if (active) setWatchingId(active.id)
       })
       .catch(() => {})
@@ -86,6 +97,7 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
     setSubmitting(true)
     try {
       const created = await createFormatTextJob(cardKey, text, {
+        input_format: inputFormat,
         spec_name: specName || undefined,
         include_cover: includeCover,
         include_toc: includeToc,
@@ -151,6 +163,9 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
     <main className="workspace">
       <section className="panel">
         <h2>提交排版任务</h2>
+        {preprocessedText && (
+          <p className="hint">已加载预处理文本（{preprocessedText.length} 字符），排版时将保留结构标记。</p>
+        )}
         <form onSubmit={handleTextSubmit}>
           <div className="option-row">
             <label>
@@ -215,9 +230,7 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
         <section className="panel">
           <h2>
             任务 #{watched.id}
-            <span className={`status status-${watched.status}`}>
-              {JOB_STATUS_LABELS[watched.status] ?? watched.status}
-            </span>
+            <span className={`status status-${watched.status}`}>{jobStatusLabel(watched)}</span>
             <span className={`connection connection-${connection}`}>
               {connection === 'open' && '实时连接中'}
               {connection === 'reconnecting' && '重连中…'}
@@ -281,9 +294,7 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
                   </td>
                   <td>{job.input_file_name ?? '粘贴文本'}</td>
                   <td>
-                    <span className={`status status-${job.status}`}>
-                      {JOB_STATUS_LABELS[job.status] ?? job.status}
-                    </span>
+                    <span className={`status status-${job.status}`}>{jobStatusLabel(job)}</span>
                   </td>
                   <td>{new Date(job.created_at).toLocaleString()}</td>
                   <td className="job-actions">

@@ -161,18 +161,23 @@ export interface JobView {
 }
 
 /** 任务进度流事件载荷（backend/app/word_stream.py）：snapshot / progress /
- *  终态同形，前端一次合并即得完整展示态。 */
+ *  终态同形，前端一次合并即得完整展示态。chunk_index/chunk_total 只有预处理
+ *  任务的标记段有值（第几块/共几块），格式化任务恒 null。 */
 export interface JobStreamState {
   status: string
   phase: string | null
   progress: number | null
   message: string | null
+  chunk_index: number | null
+  chunk_total: number | null
   error: string | null
   output_filename: string | null
 }
 
-/** 排版选项（CompileOptions 的页面形态；自定义规格 JSON 归规格生成页 #36）。 */
+/** 排版选项（CompileOptions 的页面形态；自定义规格 JSON 归规格生成页 #36）。
+ *  预处理送来的文本带 wf:type 结构标记，必须按 marked 输入渲染。 */
 export interface FormatOptions {
+  input_format?: 'auto' | 'markdown' | 'plaintext' | 'marked'
   spec_name?: string
   include_cover?: boolean
   include_toc?: boolean
@@ -189,6 +194,75 @@ export function createFormatTextJob(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, ...options }),
   })
+}
+
+// ---- 文章预处理（backend/app/word_preprocess.py 的端点，issue #35） ----
+
+/** 预处理分块参数：决定 AI 标记的分块粒度（护栏在服务端，边界外 422）。 */
+export interface PreprocessOptions {
+  chunk_paragraphs?: number
+  chunk_chars?: number
+}
+
+export function createPreprocessTextJob(
+  cardKey: string,
+  text: string,
+  options: PreprocessOptions,
+): Promise<JobView> {
+  return fetchJson<JobView>('/api/word-formatter/preprocess/text', cardKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, ...options }),
+  })
+}
+
+/** 上传预处理：解码（GBK 回落）与 docx 提文本都在服务端，这里只交原文件。 */
+export function createPreprocessFileJob(
+  cardKey: string,
+  file: File,
+  options: PreprocessOptions,
+): Promise<JobView> {
+  const form = new FormData()
+  form.append('file', file)
+  if (options.chunk_paragraphs !== undefined) {
+    form.append('chunk_paragraphs', String(options.chunk_paragraphs))
+  }
+  if (options.chunk_chars !== undefined) {
+    form.append('chunk_chars', String(options.chunk_chars))
+  }
+  return fetchJson<JobView>('/api/word-formatter/preprocess/file', cardKey, {
+    method: 'POST',
+    body: form,
+  })
+}
+
+/** 预处理段落明细（结果端点 paragraphs 元素）。 */
+export interface PreprocessParagraphView {
+  index: number
+  text: string
+  paragraph_type: string | null
+  confidence: number
+  is_rule_identified: boolean
+}
+
+/** 预处理结果（GET /preprocess/{id}/result）：标记文本是一键送格式化的
+ *  直接输入，integrity_check_passed 是"标记后与原文一致"的校验结论。 */
+export interface PreprocessResultView {
+  marked_text: string
+  paragraphs: PreprocessParagraphView[]
+  type_statistics: Record<string, number>
+  integrity_check_passed: boolean
+  warnings: string[]
+}
+
+export function getPreprocessResult(
+  cardKey: string,
+  jobId: number,
+): Promise<PreprocessResultView> {
+  return fetchJson<PreprocessResultView>(
+    `/api/word-formatter/preprocess/${jobId}/result`,
+    cardKey,
+  )
 }
 
 /** 上传排版：解码（GBK 回落）与 docx 提文本都在服务端，这里只交原文件。 */
@@ -256,7 +330,7 @@ export const SESSION_STATUS_LABELS: Record<string, string> = {
 
 export const JOB_STATUS_LABELS: Record<string, string> = {
   queued: '排队中',
-  running: '排版中',
+  running: '处理中',
   completed: '已完成',
   failed: '失败',
 }
@@ -266,10 +340,39 @@ export const JOB_TYPE_LABELS: Record<string, string> = {
   preprocess: '文章预处理',
 }
 
+/** 任务状态徽标文案：running 按任务类型给具体动词（排版中/标记中）。 */
+export function jobStatusLabel(job: Pick<JobView, 'job_type' | 'status'>): string {
+  if (job.status === 'running') {
+    return job.job_type === 'preprocess' ? '标记中' : '排版中'
+  }
+  return JOB_STATUS_LABELS[job.status] ?? job.status
+}
+
 export const JOB_PHASE_LABELS: Record<string, string> = {
   compile: '编译文档',
+  splitting: '分割段落',
+  marking: 'AI 标记',
+  validating: '一致性校验',
   done: '完成',
   failed: '失败',
+}
+
+/** 预处理段落类型文案（backend PreprocessResult 的 VALID_PARAGRAPH_TYPES）。 */
+export const PARAGRAPH_TYPE_LABELS: Record<string, string> = {
+  title_cn: '中文标题',
+  title_en: '英文标题',
+  abstract_cn: '中文摘要',
+  abstract_en: '英文摘要',
+  keywords_cn: '中文关键词',
+  keywords_en: '英文关键词',
+  heading_1: '一级标题',
+  heading_2: '二级标题',
+  heading_3: '三级标题',
+  body: '正文',
+  reference: '参考文献',
+  acknowledgement: '致谢',
+  figure_caption: '图题',
+  table_caption: '表题',
 }
 
 export function formatYuan(balanceFen: number): string {

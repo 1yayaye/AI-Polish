@@ -29,6 +29,11 @@ running，输给并发落定则跳过），进度全部落库、短事务推进�
 编译接缝：Worker 只依赖一个 ``compile(text, options) -> CompileResult`` 的
 同步可调用（生产接 :func:`app.word_formatter.compile_document`，测试接脚本
 化假编译器——不 mock 内部函数）。
+
+预处理任务（job_type=preprocess，issue #35）共享同一状态机/计费/进度通知，
+"把活干完"委托给 :func:`app.word_preprocess.execute_preprocess_job`（AI 分块
+标记是 async 调用，LLM 等待期间零数据库事务）；LLM 接缝经 ``marking_ai``
+注入（生产按 .env 惰性构造，测试接脚本化假客户端）。
 """
 
 import asyncio
@@ -39,7 +44,7 @@ from typing import Protocol
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import word_jobs, word_stream
+from app import word_jobs, word_preprocess, word_stream
 from app.db import short_tx
 from app.models import FormatJob
 from app.word_formatter import (
@@ -49,6 +54,7 @@ from app.word_formatter import (
     StyleSpec,
     compile_document,
 )
+from app.word_preprocess import MarkingAI
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +85,16 @@ def compile_options_for(options: dict | None) -> CompileOptions:
     )
 
 
+def _claim_phase_for(job_type: str) -> str:
+    """认领时的初始阶段：format=编译、preprocess=分段（后续由各自的推进
+    逻辑覆写为细阶段）。"""
+    return (
+        word_jobs.PHASE_COMPILE
+        if job_type == word_jobs.JOB_FORMAT
+        else word_preprocess.PHASE_SPLITTING
+    )
+
+
 class WordJobWorker:
     """单 Worker 任务队列。调用方只需要 :meth:`run_forever`（常驻）与
     :meth:`process_next`（处理一个 queued 任务，无则 False，供测试驱动）。
@@ -89,11 +105,25 @@ class WordJobWorker:
         session_factory: Callable[[], Session],
         *,
         compiler: FormatCompiler | None = None,
+        marking_ai: MarkingAI | None = None,
         poll_interval_seconds: float = 1.0,
     ) -> None:
         self._session_factory = session_factory
         self._compiler: FormatCompiler = compiler or compile_document
+        # 预处理的 LLM 接缝：注入优先；未注入时按 .env 惰性构造并缓存
+        # （构造期不解析——模型未配置不影响格式化任务的 Worker 挂载）。
+        self._marking_ai: MarkingAI | None = marking_ai
         self._poll_interval = poll_interval_seconds
+
+    def _marking_client(self) -> MarkingAI:
+        """预处理任务的 LLM 客户端：测试注入优先，生产接
+        :class:`app.llm.PolishLLMClient`（首次使用时按 .env 构造，未配置抛
+        ValueError——调用方对象化为任务失败，不影响格式化任务）。"""
+        if self._marking_ai is None:
+            from app.llm import PolishLLMClient
+
+            self._marking_ai = PolishLLMClient.from_settings()
+        return self._marking_ai
 
     async def run_forever(self) -> None:
         """常驻循环：拉到任务立刻处理下一个，空转按间隔轮询数据库。
@@ -146,7 +176,7 @@ class WordJobWorker:
                     )
                     .values(
                         status=word_jobs.JOB_RUNNING,
-                        phase=word_jobs.PHASE_COMPILE,
+                        phase=_claim_phase_for(row.job_type),
                         progress=0.0,
                         message="开始处理",
                         updated_at=func.current_timestamp(),
@@ -161,11 +191,11 @@ class WordJobWorker:
             word_stream.notify(job_id)
         return job_id if claimed else None
 
-    def _job_input(self, job_id: int) -> tuple[str, dict | None, str | None]:
-        """编译输入（文本、options、原文件名）：只读短事务，编译前提交关闭。"""
+    def _job_input(self, job_id: int) -> tuple[str, str, dict | None, str | None]:
+        """任务输入（类型、文本、options、原文件名）：只读短事务，开工前提交关闭。"""
         with short_tx(self._session_factory) as session:
             job = session.get(FormatJob, job_id)
-            return job.input_text, job.options, job.input_file_name
+            return job.job_type, job.input_text, job.options, job.input_file_name
 
     def _write_progress(self, job_id: int, *, progress: float, message: str) -> None:
         """进度三列短事务推进（展示态，不参与状态机），提交后叫醒进度流。"""
@@ -182,8 +212,16 @@ class WordJobWorker:
         word_stream.notify(job_id)
 
     async def _process(self, job_id: int) -> None:
-        """单任务全流程：读输入 →（零事务）单并发编译+落盘 → 终态短事务。"""
-        text, options, input_file_name = self._job_input(job_id)
+        """单任务全流程：读输入 →（零事务）按类型开工 → 终态短事务。
+
+        format：单并发 Semaphore(1) 编译 + 落盘（工作线程）；preprocess：
+        分块 AI 标记（async 原生，LLM 等待期间零数据库事务，见
+        app.word_preprocess）。终态收场（完成/失败释放）两型同路。
+        """
+        job_type, text, options, input_file_name = self._job_input(job_id)
+        if job_type == word_jobs.JOB_PREPROCESS:
+            await self._run_preprocess(job_id, text, options)
+            return
         self._write_progress(job_id, progress=0.1, message="正在编译文档")
         # 编译 + 写盘都在工作线程完成（Semaphore(1) 排队）：事件循环零阻塞，
         # 期间不持有任何数据库事务（输入已先读出）
@@ -195,7 +233,36 @@ class WordJobWorker:
                 f"文档编译失败：{result.error or '未知原因'}",
             )
             return
-        self._complete(job_id, word_jobs.output_filename_for(job_id, input_file_name))
+        self._complete(
+            job_id,
+            output_path=f"{job_id}.docx",
+            output_filename=word_jobs.output_filename_for(job_id, input_file_name),
+            message="编译完成",
+        )
+
+    async def _run_preprocess(self, job_id: int, text: str, options: dict | None) -> None:
+        """预处理任务全流程：AI 分块标记 → 结果落盘 → 完成收场。
+
+        LLM 客户端构造失败（.env 配置在创建后被移除等）按内容性失败收场，
+        不让任务悬在 running 等启动恢复。"""
+        try:
+            ai = self._marking_client()
+        except Exception as exc:
+            logger.exception("预处理任务 %d 的 LLM 客户端不可用", job_id)
+            self._fail(job_id, f"预处理失败：模型接入不可用（{exc}）")
+            return
+        reason = await word_preprocess.execute_preprocess_job(
+            self._session_factory, job_id=job_id, text=text, options=options, ai=ai
+        )
+        if reason is not None:
+            self._fail(job_id, reason)
+            return
+        self._complete(
+            job_id,
+            output_path=f"{job_id}.json",
+            output_filename=None,
+            message="预处理完成",
+        )
 
     def _compile_to_disk(
         self, job_id: int, text: str, options: dict | None
@@ -217,8 +284,18 @@ class WordJobWorker:
             logger.exception("任务 %d 编译/落盘失败", job_id)
             return CompileResult(success=False, error=str(exc))
 
-    def _complete(self, job_id: int, output_filename: str) -> None:
-        """完成收场：running → completed + 产物文件名与交付名，同一短事务。"""
+    def _complete(
+        self,
+        job_id: int,
+        *,
+        output_path: str,
+        output_filename: str | None,
+        message: str,
+    ) -> None:
+        """完成收场：running → completed + 产物路径/交付名，同一短事务。
+
+        format 产物是 {id}.docx + 交付文件名；preprocess 产物是 {id}.json
+        （结果经 /preprocess/{id}/result 回读），无交付文件名。"""
         with short_tx(self._session_factory) as session:
             session.execute(
                 update(FormatJob)
@@ -228,11 +305,11 @@ class WordJobWorker:
                 )
                 .values(
                     status=word_jobs.JOB_COMPLETED,
-                    output_path=f"{job_id}.docx",
+                    output_path=output_path,
                     output_filename=output_filename,
                     phase=word_jobs.PHASE_DONE,
                     progress=1.0,
-                    message="编译完成",
+                    message=message,
                     updated_at=func.current_timestamp(),
                 )
             )

@@ -38,6 +38,11 @@ from test_word_jobs import (  # noqa: F401 - 用户与编译接缝夹具跨测�
     usage_user,
     word_output_dir,
 )
+from test_word_preprocess import (  # noqa: F401 - 模型配置夹具与分块素材跨模块复用
+    TWO_CHUNK_TEXT,
+    configured_llm,
+)
+from test_word_preprocessor import _marking
 
 _TERMINAL_EVENTS = ("completed", "failed")
 
@@ -163,6 +168,8 @@ def test_stream_pushes_snapshot_then_progress_then_completed(
             "phase": "compile",
             "progress": 0.1,
             "message": "正在编译文档",
+            "chunk_index": None,  # 分块两列只有预处理任务有值
+            "chunk_total": None,
             "error": None,
             "output_filename": None,
         }
@@ -298,5 +305,148 @@ def test_completed_job_stream_is_snapshot_then_terminal_without_replay(
                 )
         assert [e.event for e in events] == ["snapshot", "completed"]
         assert events[0].data["status"] == "completed"
+
+    _run_on_server(server, scenario())
+
+
+# ---- 预处理分块进度流（issue #35）：同一协议，分块序号可见、续传不丢不重 ----
+
+
+class GatedMarkingLLM:
+    """预处理假标记客户端：complete 挂在 asyncio.Event 上（与流同一事件循环
+    内等待，不阻塞循环），放行后按分块序返回标记 JSON。"""
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        self.gate = gate
+        self.calls = 0
+
+    async def complete(self, messages: list[dict[str, str]]) -> str:
+        self.calls += 1
+        await self.gate.wait()
+        return _marking([(0, "heading_1")]) if self.calls == 1 else _marking([(11, "table_caption")])
+
+
+async def _create_preprocess_job(
+    client: AsyncClient, headers: dict[str, str], db_session_factory: sessionmaker
+) -> int:
+    """经 HTTP API 创建 12 段 × 每块 10 段 = 2 分块的预处理任务，等行可见。"""
+    resp = await client.post(
+        "/api/word-formatter/preprocess/text",
+        json={"text": TWO_CHUNK_TEXT, "chunk_paragraphs": 10, "chunk_chars": 8000},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    job_id = resp.json()["id"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        session = db_session_factory()
+        try:
+            if session.get(FormatJob, job_id) is not None:
+                return job_id
+        finally:
+            session.close()
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"预处理任务 {job_id} 创建后 2s 内对独立连接不可见")
+
+
+def test_preprocess_stream_shows_phase_and_chunk_progress(
+    server: object,
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    word_output_dir: object,
+    configured_llm: None,
+) -> None:
+    """分块进度可见：标记段 progress 事件带阶段（marking）与分块序号
+    （第 1 块/共 2 块），完成后 completed 收场。"""
+    user = usage_user(usage_limit=2)
+    headers = {"X-Card-Key": user.card_key}
+    gate = asyncio.Event()  # 第一个分块的标记调用挂起，制造可观察的中间态
+    worker = WordJobWorker(db_session_factory, marking_ai=GatedMarkingLLM(gate))
+
+    async def scenario() -> None:
+        async with AsyncClient(base_url=_base_url(server), trust_env=False) as client:
+            job_id = await _create_preprocess_job(client, headers, db_session_factory)
+
+            async with client.stream(
+                "GET", f"/api/word-formatter/preprocess/{job_id}/stream", headers=headers
+            ) as resp:
+                lines = _line_reader(resp)
+                head = await _collect(lines, stop=lambda e: e.event == "snapshot")
+                worker_task = asyncio.create_task(worker.process_next())
+                # 块 1 标记事件：id = 千分进度+1 = 0.5*1000+1（0.1 + 0.8*1/2）
+                tail = await _collect(lines, stop=lambda e: e.id == 501)
+                gate.set()
+                end = await _collect(lines, stop=lambda e: e.event in _TERMINAL_EVENTS)
+            assert await worker_task is True
+
+        assert head[-1].event == "snapshot" and head[-1].data["status"] == "queued"
+        chunk1 = [e for e in tail if e.id == 501]
+        assert chunk1 and chunk1[0].data["phase"] == "marking"
+        assert (chunk1[0].data["chunk_index"], chunk1[0].data["chunk_total"]) == (1, 2)
+        assert "分块 1/2" in chunk1[0].data["message"]
+        assert end[-1].event == "completed"
+        assert end[-1].data["message"] == "预处理完成"
+
+    _run_on_server(server, scenario())
+
+
+def test_preprocess_stream_resume_with_last_event_id_neither_loses_nor_duplicates(
+    server: object,
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    word_output_dir: object,
+    configured_llm: None,
+) -> None:
+    """连接 A 收到块 1 事件（id=501）后断线；放行标记直到任务落定终态，连接 B
+    带 Last-Event-ID: 501 续传：缺口由 snapshot 补齐（不丢），A 收过的增量
+    不重发（不重）。"""
+    user = usage_user(usage_limit=2)
+    headers = {"X-Card-Key": user.card_key}
+    gate = asyncio.Event()
+    worker = WordJobWorker(db_session_factory, marking_ai=GatedMarkingLLM(gate))
+
+    async def scenario() -> None:
+        async with AsyncClient(base_url=_base_url(server), trust_env=False) as client:
+            job_id = await _create_preprocess_job(client, headers, db_session_factory)
+
+            async with client.stream(
+                "GET", f"/api/word-formatter/preprocess/{job_id}/stream", headers=headers
+            ) as resp_a:
+                lines_a = _line_reader(resp_a)
+                await _collect(lines_a, stop=lambda e: e.event == "snapshot")
+                worker_task = asyncio.create_task(worker.process_next())
+                events_a = await _collect(lines_a, stop=lambda e: e.id == 501)
+            assert events_a[-1].data["chunk_index"] == 1
+
+            # 放行标记，等任务在库里落定终态（断线期间完成全部增量）
+            gate.set()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                session = db_session_factory()
+                try:
+                    row = session.get(FormatJob, job_id)
+                    if row is not None and row.status == "completed":
+                        break
+                finally:
+                    session.close()
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("预处理任务 5s 内未落定终态")
+            await worker_task
+
+            async with client.stream(
+                "GET",
+                f"/api/word-formatter/preprocess/{job_id}/stream",
+                headers={**headers, "Last-Event-ID": "501"},
+            ) as resp_b:
+                events_b = await _collect(
+                    _line_reader(resp_b), stop=lambda e: e.event in _TERMINAL_EVENTS
+                )
+
+        # 不丢不重：B 只剩 snapshot（全量缺口）+ completed（终态不带 id），
+        # A 收过的块 1 事件（id=501）与其后的块 2 增量都不再以增量出现
+        assert [e.event for e in events_b] == ["snapshot", "completed"]
+        assert events_b[0].data["status"] == "completed"
+        assert events_b[-1].data["status"] == "completed"
 
     _run_on_server(server, scenario())

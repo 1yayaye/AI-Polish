@@ -1,6 +1,8 @@
 """Word Formatter 任务进度推送（issue #34）：任务进度流端点与事件协议的唯一拥有者。
 
-外部契约（GET /api/word-formatter/jobs/{id}/stream）：
+外部契约（GET /api/word-formatter/jobs/{id}/stream 与
+GET /api/word-formatter/preprocess/{id}/stream——预处理页（issue #35）用
+后者，同一协议同一实现）：
 
 - **认证**：卡密只走 ``X-Card-Key`` 请求头（复用 :func:`app.auth.get_current_user`），
   缺失/无效 401；本人任务之外 404（不泄露他人任务存在性）。卡密绝不进 URL——
@@ -89,13 +91,16 @@ def notify(job_id: int) -> None:
 
 
 def _job_payload(job: FormatJob) -> dict:
-    """任务流状态的统一载荷（snapshot / progress / 终态同形）：进度六列加
-    失败原因与交付文件名，前端一次合并即得完整展示态。"""
+    """任务流状态的统一载荷（snapshot / progress / 终态同形）：进度列全量加
+    失败原因与交付文件名，前端一次合并即得完整展示态。分块两列只有预处理
+    任务在标记段有值，格式化任务恒 None。"""
     return {
         "status": job.status,
         "phase": job.phase,
         "progress": job.progress,
         "message": job.message,
+        "chunk_index": job.chunk_index,
+        "chunk_total": job.chunk_total,
         "error": job.error,
         "output_filename": job.output_filename,
     }
@@ -184,14 +189,17 @@ async def _job_stream(
 
 
 @router.get("/jobs/{job_id}/stream")
+@router.get("/preprocess/{job_id}/stream")
 async def stream_job_progress(
     job_id: int,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
-    """建立任务进度流。认证/鉴权/首读在响应前完成（401/404 由此给出）；
-    先订阅后读库，订阅到首读之间提交的状态不会漏。"""
+    """建立任务进度流（/jobs/… 与 /preprocess/… 两个路径同一协议同一实现：
+    预处理页的链路词汇是"预处理任务"，页面不必知道自己走的是任务流）。
+    认证/鉴权/首读在响应前完成（401/404 由此给出）；先订阅后读库，订阅到
+    首读之间提交的状态不会漏。"""
     queue = _bus.subscribe(job_id)
     try:
         try:

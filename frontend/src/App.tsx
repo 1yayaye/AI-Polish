@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import UserShell from './UserShell'
 import WordFormatterPage from './word/WordFormatterPage'
+import ArticlePreprocessorPage from './word/ArticlePreprocessorPage'
 import Workspace from './Workspace'
 import { ApiError, getQuota, type Quota } from './api'
 
@@ -118,9 +119,12 @@ export default function App() {
             path="word"
             element={<WordFormatterPage cardKey={userKey} refreshQuota={refreshQuota} />}
           />
-          {/* 规格生成 / 文章预处理 / 格式检查三页由 #36/#35/#37 各自替换占位 */}
+          {/* 规格生成 / 格式检查两页由 #36/#37 各自替换占位 */}
           <Route path="word/specs" element={<PlaceholderPage title="排版规格生成" />} />
-          <Route path="word/preprocess" element={<PlaceholderPage title="文章预处理" />} />
+          <Route
+            path="word/preprocess"
+            element={<ArticlePreprocessorPage cardKey={userKey} refreshQuota={refreshQuota} />}
+          />
           <Route path="word/check" element={<PlaceholderPage title="格式检查" />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

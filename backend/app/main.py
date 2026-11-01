@@ -22,6 +22,7 @@ from app.llm import PolishLLMClient
 from app.optimization import router as optimization_router
 from app.stream import router as stream_router
 from app.word_jobs import router as word_jobs_router
+from app.word_preprocess import router as word_preprocess_router
 from app.word_stream import router as word_stream_router
 from app.word_worker import WordJobWorker
 from app.worker import PipelineWorker
@@ -32,8 +33,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """启动恢复协议与常驻 Worker（润色流水线 + Word Formatter 任务队列）。
     关停时取消全部后台任务。
 
-    Word Formatter 任务（app.word_jobs）不依赖模型接入：启动恢复（遗留
-    running 任务复位续跑或超限失败释放）与任务 Worker 无条件挂载。
+    Word Formatter 任务地基（app.word_jobs）：启动恢复（遗留 running 任务
+    复位续跑或超限失败释放）与任务 Worker 无条件挂载。格式化任务不依赖模型
+    接入；预处理任务依赖（创建即 503 拦截，app.word_preprocess），Worker 内
+    按需惰性构造 LLM 客户端——配置被移除的存量任务按内容性失败收场。
 
     润色流水线（模型接入三项齐备才启动，ADR-0005；缺项跳过等于本地开发/
     纯计费部署没有流水线，僵尸恢复随之不挂——没有流水线就没有运行中的
@@ -46,9 +49,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     显性化。
     """
     background_tasks: list[asyncio.Task[None]] = []
-    # Word Formatter 任务地基（spec #31）：格式化任务不依赖模型接入，启动
-    # 恢复（遗留 running 复位续跑 / 超限失败释放）与任务 Worker 无条件挂载
-    # ——与润色流水线"未配置即整体不启动"不同，这里没有可缺项的依赖。
+    # Word Formatter 任务地基（spec #31/#35）：Worker 无条件挂载（格式化任务
+    # 不依赖模型接入；预处理的依赖在创建入口 503 拦截、Worker 内惰性解析）
+    # ——与润色流水线"未配置即整体不启动"不同，这里没有整体可缺项的依赖。
     app_word_jobs.recover_interrupted(app_db.SessionLocal)
     background_tasks.append(
         asyncio.create_task(
@@ -95,6 +98,7 @@ app.include_router(optimization_router)
 app.include_router(export_router)
 app.include_router(stream_router)
 app.include_router(word_jobs_router)
+app.include_router(word_preprocess_router)
 app.include_router(word_stream_router)
 
 

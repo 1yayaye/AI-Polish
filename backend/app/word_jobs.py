@@ -81,6 +81,10 @@ class JobSpecInvalid(Exception):
     """自定义排版规格 JSON 非法（对外 422，创建零副作用）。"""
 
 
+class UploadFormatError(Exception):
+    """上传文件不可解码为排版输入（后缀不支持/docx 损坏，对外 422，零副作用）。"""
+
+
 # ---- 产物落盘：路径解析的唯一入口（DB 只存文件名） ----
 
 
@@ -272,10 +276,11 @@ InputFormatName = Literal["auto", "markdown", "plaintext", "marked"]
 _UPLOAD_FORMATS = {"txt": "auto", "md": "markdown", "docx": "auto"}
 
 
-def _validated_text(text: str) -> str:
-    """排版文本统一校验：非空 + 长度上限（独立于会话的 5 万上限，排版对象是
-    整篇文档）。运行时读取 settings（改配置 = 改 .env + 重启，测试可
-    monkeypatch）；粘贴路径经 pydantic 校验器映射 422，上传路径由路由映射。"""
+def validated_text(text: str) -> str:
+    """排版/预处理输入文本统一校验（两条纵切共用同一护栏）：非空 + 长度上限
+    （独立于会话的 5 万上限，排版对象是整篇文档）。运行时读取 settings（改
+    配置 = 改 .env + 重启，测试可 monkeypatch）；粘贴路径经 pydantic 校验器
+    映射 422，上传路径由路由映射。"""
     if not text.strip():
         raise ValueError("文本不能为空")
     limit = settings.max_word_text_chars
@@ -284,14 +289,29 @@ def _validated_text(text: str) -> str:
     return text
 
 
-def _decode_uploaded_text(content: bytes) -> str:
-    """上传文本解码：UTF-8 优先，失败回落 GBK（Windows 记事本默认编码，
-    spec #31 用户故事 3）。两者皆非的字节按 GBK 带替换符解出——宁可出现
-    占位符也不让一次上传 500，由后续空文本/长度校验兜底。"""
+def extract_upload_text(file_name: str, content: bytes) -> tuple[str, str]:
+    """上传文件 → (输入文本, input_format)：格式化与预处理共用的上传解码护栏。
+
+    txt/md 按 UTF-8 优先 GBK 回落解码（spec #31 用户故事 3），docx 走提文本
+    工具，input_format 由扩展名推导（.md 显式 Markdown，其余交给渲染库 auto
+    探测）。不支持的后缀与损坏的 docx 抛 :class:`UploadFormatError`（路由映射
+    422，挡在预留之前）；解码出的文本再过 :func:`validated_text`。
+    """
+    suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    input_format = _UPLOAD_FORMATS.get(suffix)
+    if input_format is None:
+        raise UploadFormatError("仅支持 txt/md/docx 文件")
+    if suffix == "docx":
+        try:
+            return extract_text_from_docx(content), input_format
+        except Exception as exc:
+            raise UploadFormatError("无法读取 docx 文件，请确认文件未损坏") from exc
     try:
-        return content.decode("utf-8")
+        return content.decode("utf-8"), input_format
     except UnicodeDecodeError:
-        return content.decode("gbk", errors="replace")
+        # GBK 回落（Windows 记事本默认编码）：两者皆非的字节按 GBK 带替换符
+        # 解出——宁可出现占位符也不让一次上传 500，由空文本/长度校验兜底
+        return content.decode("gbk", errors="replace"), input_format
 
 
 class FormatTextRequest(BaseModel):
@@ -314,7 +334,7 @@ class FormatTextRequest(BaseModel):
         运行时读取 settings（改配置 = 改 .env + 重启，测试可 monkeypatch）；
         超限 ValidationError 由 FastAPI 映射 422。
         """
-        return _validated_text(value)
+        return validated_text(value)
 
 
 def _validated_custom_spec(spec: dict | None) -> dict | None:
@@ -411,32 +431,19 @@ async def create_format_file_job(
 ) -> JobOut:
     """上传文件创建格式化任务：解码/提文本（422）→ 预留次数（403）→ queued。
 
-    解码与提文本是本端点的内部职责，调用方只交文件：txt/md 按 UTF-8 优先
-    GBK 回落解码（:func:`_decode_uploaded_text`），docx 走 M4-T1 提文本工具，
-    input_format 由扩展名推导（.md 显式 Markdown，其余交给渲染库 auto 探测）。
-    原文件名随任务保留，交付文件名由 :func:`output_filename_for` 推导
-    （原名_formatted.docx）。上传字节数护栏归 M4-T7 收尾票（spec #31）。
+    解码与提文本归 :func:`extract_upload_text`（与预处理共用同一护栏），
+    调用方只交文件。原文件名随任务保留，交付文件名由
+    :func:`output_filename_for` 推导（原名_formatted.docx）。上传字节数护栏
+    归 M4-T7 收尾票（spec #31）。
     """
     file_name = file.filename or ""
-    suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    input_format = _UPLOAD_FORMATS.get(suffix)
-    if input_format is None:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="仅支持 txt/md/docx 文件"
-        )
     content = await file.read()
-    if suffix == "docx":
-        try:
-            text = extract_text_from_docx(content)
-        except Exception as exc:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="无法读取 docx 文件，请确认文件未损坏",
-            ) from exc
-    else:
-        text = _decode_uploaded_text(content)
     try:
-        text = _validated_text(text)
+        text, input_format = extract_upload_text(file_name, content)
+    except UploadFormatError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    try:
+        text = validated_text(text)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     options = {

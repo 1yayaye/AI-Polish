@@ -261,6 +261,10 @@ class FormatJob(Base):
     phase: Mapped[str | None] = mapped_column(String(32))
     progress: Mapped[float | None] = mapped_column(Float)
     message: Mapped[str | None] = mapped_column(String(255))
+    # 分块进度两列：预处理任务的"第几块/共几块"（AI 分块标记推进期写入，
+    # 进度流的分块序号事实源）；格式化任务恒空
+    chunk_index: Mapped[int | None] = mapped_column(Integer)
+    chunk_total: Mapped[int | None] = mapped_column(Integer)
     output_path: Mapped[str | None] = mapped_column(String(255))
     output_filename: Mapped[str | None] = mapped_column(String(255))
     error: Mapped[str | None] = mapped_column(Text)
