@@ -16,6 +16,12 @@ failed——任何进程崩溃不得吞掉用户预付余额（rewrite-plan §6 
   running 且 updated_at 早于阈值的会话。updated_at 由流水线每次推进时拨新
   （app.worker._write_result），停滞即"进程活着但流水线卡死"的活僵尸，兜底
   退款置 failed。阈值默认约 2 小时（settings.recovery_stuck_after_seconds）。
+- queued 盲区（只告警、不退款）：排队是合法等待态，queued 行没有认领标记，
+  无法从会话行区分"合法排队"与"孤儿排队"——退款兜底会误伤合法等待的用户，
+  比"漏告警"严重得多。两处告警把盲区压缩到"需要人看日志"：巡检发现 queued
+  滞留超阈值（:func:`patrol_once` 末尾），或流水线未配置时启动清点 queued
+  （:func:`report_orphan_queued`，lifespan 在 Worker 不启动的分支调用）。
+  告警不解决资金扣住问题，只把"无人知晓"变成"日志可见"——明确接受的取舍。
 
 兜底退款（:func:`_abandon`）：条件 UPDATE running→failed 赢得终态归属后，
 同一短事务走 :func:`app.billing.refund` 全额退 charged_fen（金额取自会话行，
@@ -134,7 +140,8 @@ def patrol_once(
     """巡检一轮：兜底退款全部滞留超阈值的 running 会话，返回收置个数。
 
     滞留判定：running 且 updated_at 早于 now - stuck_after_seconds（流水线
-    最后一次推进时刻，见模块级协议）。
+    最后一次推进时刻，见模块级协议）。另清点滞留超阈值的 queued 会话并
+    告警（只告警不退款，不计入返回值，见模块级协议"queued 盲区"）。
     """
     threshold = (
         settings.recovery_stuck_after_seconds
@@ -159,7 +166,47 @@ def patrol_once(
             abandoned += 1
     if abandoned:
         logger.warning("僵尸巡检：本轮兜底退款 %d 个滞留会话", abandoned)
+    # 收尾清点滞留 queued（只读短事务，只告警不退款）：queued 是合法等待态，
+    # 滞留只说明 Worker 可能未在服务队列，退款会误伤合法等待的用户——见
+    # 模块级协议"queued 盲区"。阈值复用 running 巡检的，误告噪音出现再拆。
+    cutoff_queued = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=threshold)
+    with short_tx(session_factory) as session:
+        stale_queued: int = session.execute(
+            select(func.count(OptimizationSession.id)).where(
+                OptimizationSession.status == optimization.SESSION_QUEUED,
+                OptimizationSession.updated_at < cutoff_queued,
+            )
+        ).scalar_one()
+    if stale_queued:
+        logger.warning(
+            "僵尸巡检：%d 个 queued 会话滞留超过 %d 秒无人认领——Worker 可能未在服务"
+            "队列（排队是合法等待态，不做退款兜底）；请排查 Worker 存活与 LLM 配置",
+            stale_queued,
+            int(threshold),
+        )
     return abandoned
+
+
+def report_orphan_queued(session_factory: sessionmaker) -> int:
+    """流水线未配置启动时清点 queued 会话并告警（不碰任何状态与资金）。
+
+    现实中最可能的真实盲区：运营商清掉 LLM 配置重启后，Worker 不启动，库内
+    queued 会话的预扣资金被无限期扣住且此前无任何日志。返回 queued 个数供
+    测试断言；告警语义见模块级协议"queued 盲区"。
+    """
+    with short_tx(session_factory) as session:
+        orphaned: int = session.execute(
+            select(func.count(OptimizationSession.id)).where(
+                OptimizationSession.status == optimization.SESSION_QUEUED
+            )
+        ).scalar_one()
+    if orphaned:
+        logger.warning(
+            "启动检查：流水线未配置（LLM 接入缺项），库内 %d 个 queued 会话无人认领、"
+            "预扣资金被扣住——请配置 LLM 后重启服务",
+            orphaned,
+        )
+    return orphaned
 
 
 def _abandon(session_factory: sessionmaker, session_id: int, *, reason: str) -> bool:

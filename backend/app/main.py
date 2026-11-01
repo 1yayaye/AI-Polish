@@ -31,7 +31,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     启动序（T5 僵尸恢复协议，app.recovery）：先跑启动恢复（扫描上一进程
     遗留的 running 僵尸：未超续跑上限的复位 queued，超限的兜底退款；queued
     不碰，重启期间新提交的任务由新 Worker 正常拉取），再启动 Worker 与巡检
-    看门狗协程。
+    看门狗协程。流水线未配置时清点库内 queued 会话并告警（不启动任何后台
+    任务）——运营商清掉 LLM 配置重启后，queued 会话的预扣资金被无限期扣住，
+    该盲区由 app.recovery.report_orphan_queued 的日志显性化。
     """
     background_tasks: list[asyncio.Task[None]] = []
     if app_llm.is_configured():
@@ -45,6 +47,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 app_recovery.patrol_forever(app_db.SessionLocal), name="zombie-patrol"
             )
         )
+    else:
+        app_recovery.report_orphan_queued(app_db.SessionLocal)
     try:
         yield
     finally:

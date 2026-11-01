@@ -10,6 +10,7 @@ kill -9 等价物（spec #15 测试决策）：worker 协程在 LLM 等待中被
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -272,6 +273,90 @@ def test_patrol_forever_survives_round_errors(
     asyncio.run(scenario())
 
 
+# ---- 孤儿 queued 盲区：只告警不退款（方案 B） ----
+
+
+def test_patrol_warns_on_stale_queued_without_touching_it(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker, caplog: pytest.LogCaptureFixture
+) -> None:
+    """滞留 queued 是合法等待态：巡检只告警，不退款、不改状态、不计数。"""
+    user = funded_user()
+    session_id = _create_queued(db_session_factory, user, "滞留排队。", "paper_polish")
+    _set_updated_at(
+        db_session_factory, session_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=3)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.recovery"):
+        assert recovery_mod.patrol_once(db_session_factory, stuck_after_seconds=7200) == 0
+
+    assert "queued 会话滞留" in caplog.text  # 告警可见
+    row = _session_row(db_session_factory, session_id)
+    assert row.status == "queued" and row.attempt_count == 0  # 会话原样
+    assert _refund_rows(db_session_factory, session_id) == []
+    assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN - row.charged_fen
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_patrol_does_not_warn_on_fresh_queued(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker, caplog: pytest.LogCaptureFixture
+) -> None:
+    user = funded_user()
+    _create_queued(db_session_factory, user, "正常排队。", "paper_polish")
+
+    with caplog.at_level(logging.WARNING, logger="app.recovery"):
+        assert recovery_mod.patrol_once(db_session_factory, stuck_after_seconds=7200) == 0
+
+    assert "queued" not in caplog.text  # 新鲜 queued 不告警
+
+
+def test_report_orphan_queued_counts_and_warns(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="app.recovery"):
+        assert recovery_mod.report_orphan_queued(db_session_factory) == 0
+    assert "queued" not in caplog.text  # 空库不告警
+
+    caplog.clear()
+    user = funded_user()
+    _create_queued(db_session_factory, user, "排队一。", "paper_polish")
+    _create_queued(db_session_factory, user, "排队二。", "paper_enhance")
+
+    with caplog.at_level(logging.WARNING, logger="app.recovery"):
+        assert recovery_mod.report_orphan_queued(db_session_factory) == 2
+
+    assert "queued 会话无人认领" in caplog.text
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_lifespan_warns_on_orphan_queued_when_llm_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+    client,
+    funded_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """流水线未配置启动：库内 queued 会话经启动清点告警，会话不被改动。"""
+    for attr in ("llm_base_url", "llm_api_key", "llm_model"):
+        monkeypatch.setattr(settings, attr, "")
+    constructed: list[object] = []
+    monkeypatch.setattr(
+        app_main,
+        "PipelineWorker",
+        lambda *_args: constructed.append(_args),  # type: ignore[arg-type,return-value]
+    )
+    user = funded_user()
+    session_id = _create_queued(db_session_factory, user, "孤儿排队。", "paper_polish")
+
+    with caplog.at_level(logging.WARNING, logger="app.recovery"):
+        with client:
+            pass
+
+    assert "queued 会话无人认领" in caplog.text  # 盲区显性化
+    assert constructed == []  # Worker 依旧不启动
+    row = _session_row(db_session_factory, session_id)
+    assert row.status == "queued" and row.attempt_count == 0  # 只告警，不碰会话
+
+
 # ---- RefundConflict：兜底路径不崩溃，显性记录后留待重试 ----
 
 
@@ -318,6 +403,11 @@ class _StubRecovery:
     def recover_interrupted(self, _factory: object) -> RecoveryReport:
         self._events.append("recovered")
         return RecoveryReport(resumed=0, abandoned=0)
+
+    def report_orphan_queued(self, _factory: object) -> int:
+        # 未配置分支的启动清点：桩只承接调用，不入 events（该测试断言
+        # "无流水线即无恢复动作"，queued 清点是只读告警不算动作）
+        return 0
 
     async def patrol_forever(self, _factory: object, **_kwargs: object) -> None:
         self._events.append("patrol-started")
