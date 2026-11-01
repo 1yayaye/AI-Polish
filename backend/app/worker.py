@@ -18,7 +18,7 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
   并发取消（对方已置 cancelled 并退款）时不再退。
 - :class:`billing.RefundConflict` 与其余一切异常（编程错误、数据库故障）
   直接冒泡终止 Worker：响亮失败优于吞掉，崩溃后会话停在中途状态、预扣
-  资金原样在账，由 T5 僵尸恢复协议接管（本模块不实现恢复）。
+  资金原样在账，由僵尸恢复协议接管（app.recovery，本模块不实现恢复）。
 
 LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方法 +
 ``model_name``），生产接 :class:`app.llm.PolishLLMClient`，测试接脚本化假
@@ -31,14 +31,14 @@ LLM 接缝：Worker 只依赖 :class:`SegmentPolisher`（一个 ``polish`` 方�
 
 import asyncio
 import functools
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import Protocol
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app import billing, optimization, seeds, stream
+from app.db import short_tx
 from app.llm import LLMError
 from app.models import OptimizationSession, Segment, SegmentChangeLog
 
@@ -94,25 +94,12 @@ class PipelineWorker:
         await self._process(session_id, mode)
         return True
 
-    # ---- 短事务单元：与 app.db.get_session 同一提交/回滚协议 ----
-
-    @contextmanager
-    def _short_tx(self) -> Iterator[Session]:
-        session = self._session_factory()
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
-    # ---- 状态机：认领 / 推进 / 完成 / 失败退款（全部条件 UPDATE 守卫） ----
+    # ---- 状态机：认领 / 推进 / 完成 / 失败退款（全部条件 UPDATE 守卫）。
+    # ---- 每个单元一个 app.db.short_tx 短事务（与 get_session 同一协议） ----
 
     def _claim(self) -> tuple[int, str] | None:
         """认领最老的 queued 会话（queued → running + model_snapshot）。"""
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             row = session.execute(
                 select(OptimizationSession)
                 .where(OptimizationSession.status == optimization.SESSION_QUEUED)
@@ -163,7 +150,7 @@ class PipelineWorker:
         self._complete(session_id)
 
     def _segment_seqs(self, session_id: int, stage: str) -> list[int]:
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             return list(
                 session.execute(
                     select(Segment.seq)
@@ -174,7 +161,7 @@ class PipelineWorker:
 
     def _session_active(self, session_id: int) -> bool:
         """会话仍在 running（只读短事务，LLM 调用前的取消检查点）。"""
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             status: str | None = session.execute(
                 select(OptimizationSession.status).where(OptimizationSession.id == session_id)
             ).scalar_one_or_none()
@@ -186,7 +173,7 @@ class PipelineWorker:
         enhance 段的输入是润色产物：由润色完成事务覆盖（见 _write_result），
         同事务保证两者要么都发生要么都不发生，无需运行时修补。
         """
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             source: str | None = session.execute(
                 select(Segment.source_text).where(
                     Segment.session_id == session_id,
@@ -200,8 +187,12 @@ class PipelineWorker:
     def _write_result(
         self, session_id: int, stage: str, seq: int, source: str, result: str
     ) -> None:
-        """段落结果 + 变更记录 + 增强段输入覆盖，一个短事务原子落库。"""
-        with self._short_tx() as session:
+        """段落结果 + 变更记录 + 增强段输入覆盖，一个短事务原子落库。
+
+        同事务把会话行 updated_at 拨到本次推进时刻：它是"流水线最后一次
+        对该会话有写动作"的事实源，T5 巡检据此判定滞留（app.recovery）。
+        """
+        with short_tx(self._session_factory) as session:
             session.execute(
                 update(Segment)
                 .where(
@@ -214,6 +205,11 @@ class PipelineWorker:
                     status=optimization.SEGMENT_COMPLETED,
                     updated_at=func.current_timestamp(),
                 )
+            )
+            session.execute(
+                update(OptimizationSession)
+                .where(OptimizationSession.id == session_id)
+                .values(updated_at=func.current_timestamp())
             )
             if stage == optimization.STAGE_POLISH:
                 session.execute(
@@ -237,7 +233,7 @@ class PipelineWorker:
         stream.notify(session_id)
 
     def _complete(self, session_id: int) -> None:
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             session.execute(
                 update(OptimizationSession)
                 .where(
@@ -255,7 +251,7 @@ class PipelineWorker:
 
         RefundConflict 按计费契约原样冒泡（编程错误显性化，不吞不绕）。
         """
-        with self._short_tx() as session:
+        with short_tx(self._session_factory) as session:
             failed = (
                 session.execute(
                     update(OptimizationSession)

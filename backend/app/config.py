@@ -40,5 +40,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
 
+    # 僵尸恢复协议（app.recovery）：同一会话最多续跑 recovery_max_attempts
+    # 次（每次崩溃重启 +1），再崩即兜底退款；running 会话超过
+    # recovery_stuck_after_seconds 无任何推进由巡检协程兜底退款；
+    # recovery_patrol_interval_seconds 是巡检轮询间隔。
+    recovery_max_attempts: int = 3
+    recovery_stuck_after_seconds: int = 2 * 60 * 60
+    recovery_patrol_interval_seconds: float = 300.0
+
 
 settings = Settings()

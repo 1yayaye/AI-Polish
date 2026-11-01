@@ -14,7 +14,8 @@
   （M1/T4 计费服务收口），禁止先读后写的 ORM 赋值路径。
 """
 
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -71,6 +72,22 @@ def get_session() -> Iterator[Session]:
     请求处理函数不要在本会话跨越外部 I/O（见模块级短事务纪律）。
     """
     session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@contextmanager
+def short_tx(factory: sessionmaker) -> Iterator[Session]:
+    """非请求路径（Worker、恢复器等后台任务）自管的短事务单元：同一提交/
+    回滚协议（get_session 的非依赖注入形态）。用完即提交，异常即回滚并冒泡。
+    """
+    session = factory()
     try:
         yield session
         session.commit()
