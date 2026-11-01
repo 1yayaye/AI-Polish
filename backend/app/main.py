@@ -15,6 +15,7 @@ from app import llm as app_llm
 from app import recovery as app_recovery
 from app.admin import router as admin_router
 from app.api import router
+from app.export import router as export_router
 from app.llm import PolishLLMClient
 from app.optimization import router as optimization_router
 from app.stream import router as stream_router
@@ -61,6 +62,7 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(admin_router)
 app.include_router(optimization_router)
+app.include_router(export_router)
 app.include_router(stream_router)
 
 

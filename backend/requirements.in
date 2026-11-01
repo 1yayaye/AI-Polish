@@ -6,3 +6,9 @@ pyjwt
 sqlalchemy
 alembic
 openai
+# word_formatter 渲染库（ADR-0004 黑盒移植）的依赖链
+python-docx
+# 移植代码按 mistune 3.3 的 AST 节点形态编写（3.4 起 heading level 移入 attrs），
+# 升级前需先核对 services/ast_generator.py 的节点解析
+mistune<3.4
+lxml
