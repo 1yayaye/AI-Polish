@@ -59,7 +59,7 @@ from sqlalchemy import MetaData, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.models import CustomPrompt, LedgerEntry, SavedSpec, User
+from app.models import CustomPrompt, LedgerEntry, SavedSpec, User, mask_card_key
 from app.seeds import SEED_FILE, seed_system_prompts
 
 # 旧会话 id → 账本 task_id 的统一偏移，见模块级"关键决策"。
@@ -102,12 +102,6 @@ class MigrationReport:
     # True 表示此前已成功迁移过同一快照（幂等跳过），本次未写入任何数据
     already_migrated: bool = False
     source_fingerprint: str = ""
-
-
-def _mask_card_key(card_key: str) -> str:
-    if len(card_key) <= 8:
-        return card_key[:2] + "****"
-    return card_key[:4] + "****" + card_key[-4:]
 
 
 def _legacy_tables(old_engine: Engine) -> dict:
@@ -272,7 +266,7 @@ def _reconcile(session: Session) -> list[tuple[int, str, int, int]]:
     mismatches: list[tuple[int, str, int, int]] = []
     for user in session.execute(select(User).order_by(User.id)).scalars():
         ledger_sum = sums.get(user.id) or 0
-        row = (user.id, _mask_card_key(user.card_key), ledger_sum, user.balance_fen)
+        row = (user.id, mask_card_key(user.card_key), ledger_sum, user.balance_fen)
         rows.append(row)
         if ledger_sum != user.balance_fen:
             mismatches.append(row)

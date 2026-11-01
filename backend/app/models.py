@@ -35,6 +35,17 @@ class User(Base):
         return self.usage_limit - self.usage_used
 
 
+def mask_card_key(card_key: str) -> str:
+    """卡密脱敏展示：保留首尾各 4 位（短卡密只留首 2 位），中段以 **** 遮盖。
+
+    卡密的展示规则随卡密概念放在这里，供管理端用户列表与迁移对账报告共用；
+    完整卡密只在发卡时交付一次。
+    """
+    if len(card_key) <= 8:
+        return card_key[:2] + "****"
+    return card_key[:4] + "****" + card_key[-4:]
+
+
 class LedgerEntry(Base):
     """账本：余额与次数全部变动的流水（GLOSSARY：账本），每笔变动一行。
 

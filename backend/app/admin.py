@@ -24,7 +24,7 @@ from app import billing
 from app.billing import InsufficientBalance
 from app.config import settings
 from app.db import get_session
-from app.models import User
+from app.models import User, mask_card_key
 
 router = APIRouter(prefix="/api/admin")
 
@@ -159,12 +159,6 @@ class AdminUserSummary(BaseModel):
     usage_remaining: int
 
 
-def _mask_card_key(card_key: str) -> str:
-    if len(card_key) <= 8:
-        return card_key[:2] + "****"
-    return card_key[:4] + "****" + card_key[-4:]
-
-
 @router.get("/users")
 def list_users(
     _admin: str = Depends(get_current_admin),
@@ -174,7 +168,7 @@ def list_users(
     return [
         AdminUserSummary(
             id=u.id,
-            card_key=_mask_card_key(u.card_key),
+            card_key=mask_card_key(u.card_key),
             balance_fen=u.balance_fen,
             usage_limit=u.usage_limit,
             usage_remaining=u.usage_remaining,
