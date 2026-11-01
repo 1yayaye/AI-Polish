@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AI-Polish 一键部署：构建前端 + 安装后端锁定依赖 + 安装/重启 systemd 与 Nginx。
+# AI-Polish 一键部署：构建前端 + 安装后端锁定依赖 + 数据库迁移与种子 + 安装/重启 systemd 与 Nginx。
 # 在服务器上以 root（或 sudo）于仓库根目录执行：sudo ./deploy.sh
 # 一次性准备工作（用户、目录、.env、Nginx 安装）见 docs/deployment.md。
 set -euo pipefail
@@ -32,8 +32,18 @@ fi
 "$BACKEND_VENV/bin/pip" install -q --upgrade pip
 "$BACKEND_VENV/bin/pip" install -q -r "$REPO_DIR/backend/requirements.txt"
 
-log "准备数据目录与权限..."
+log "准备数据目录..."
 mkdir -p "$REPO_DIR/backend/data"
+
+# 建表与种子必须在服务重启前完成：schema 只能靠 alembic 建（应用启动不建表），
+# 不跑迁移的话 /health 依旧正常，但任何触库的 /api 调用都会 500。
+log "执行数据库迁移（alembic upgrade head，幂等）..."
+(cd "$REPO_DIR/backend" && "$BACKEND_VENV/bin/alembic" upgrade head)
+
+log "注入系统预设提示词种子（幂等）..."
+(cd "$REPO_DIR/backend" && "$BACKEND_VENV/bin/python" -m app.seeds)
+
+# 迁移/种子刚生成的 data/app.db 等文件归运行服务的 aipolish 所有
 if id aipolish >/dev/null 2>&1; then
   chown -R aipolish:aipolish "$REPO_DIR/backend/data"
 else

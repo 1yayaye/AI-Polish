@@ -34,7 +34,9 @@ cp backend/.env.example backend/.env
 sudo ./deploy.sh
 ```
 
-脚本依次完成：构建前端（构建内存上限 384MB，防止 512MB 机器 OOM）→ 按 `backend/requirements.txt` 锁定版本安装后端依赖到 `.venv` → 安装 systemd unit 与 Nginx 配置 → 重启服务 → 对 `127.0.0.1:8000/health` 与 Nginx 层 `/health` 做健康检查。任何一步失败即中止。
+脚本依次完成：构建前端（构建内存上限 384MB，防止 512MB 机器 OOM）→ 按 `backend/requirements.txt` 锁定版本安装后端依赖到 `.venv` → 数据库迁移 `alembic upgrade head` 建表 → 注入系统预设提示词种子（`python -m app.seeds`）→ 安装 systemd unit 与 Nginx 配置 → 重启服务 → 对 `127.0.0.1:8000/health` 与 Nginx 层 `/health` 做健康检查。任何一步失败即中止。
+
+迁移与种子都是幂等的：首次部署建出全部表和系统提示词；日常发版重复执行时，alembic 停在 `head` 不重复建表，种子按 (stage, name) 判重、不覆盖已在库内改动过的系统提示词。应用启动本身不建表——跳过迁移时 `/health` 仍正常，但触库的 `/api` 调用会 500，因此不要手动绕过这一步。
 
 ## 3. 日常发版
 
@@ -49,6 +51,13 @@ sudo ./deploy.sh
 ```bash
 curl http://127.0.0.1:8000/health   # {"status":"ok"}
 curl http://127.0.0.1/health        # 经 Nginx
+```
+
+`/health` 只证明服务活着，不触库。再确认 schema 与种子已就位（`/health` 通过但表缺失时，触库的 `/api` 调用会 500）：
+
+```bash
+cd /opt/ai-polish/backend
+.venv/bin/alembic current           # 应停在 head（fbc9cd7b51eb）
 ```
 
 浏览器访问服务器 IP 应看到卡密输入页。后端日志：`journalctl -u ai-polish -f`。
