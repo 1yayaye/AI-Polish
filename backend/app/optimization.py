@@ -69,6 +69,11 @@ _STAGES_BY_MODE = {
 }
 
 
+def stages_for_mode(mode: str) -> tuple[str, ...]:
+    """处理模式的阶段推进序（GLOSSARY：处理模式）：Worker 据此逐阶段过段落。"""
+    return _STAGES_BY_MODE[mode]
+
+
 class SessionNotFound(Exception):
     """会话不存在或不属于当前用户（对外一律 404，不泄露他人会话存在性）。"""
 

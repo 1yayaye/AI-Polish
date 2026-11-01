@@ -5,3 +5,4 @@ pydantic-settings
 pyjwt
 sqlalchemy
 alembic
+openai

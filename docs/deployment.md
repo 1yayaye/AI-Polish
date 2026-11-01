@@ -67,7 +67,7 @@ curl http://127.0.0.1/health        # 经 Nginx（80 块的 /health 直接反代
 
 ```bash
 cd /opt/ai-polish/backend
-.venv/bin/alembic current           # 应停在 head（fbc9cd7b51eb）
+.venv/bin/alembic current           # 应停在 head（版本号随迁移演进，用 alembic heads 对照）
 ```
 
 浏览器访问服务器 IP 应看到卡密输入页。后端日志：`journalctl -u ai-polish -f`。

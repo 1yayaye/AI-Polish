@@ -190,6 +190,35 @@ class Segment(Base):
     )
 
 
+class SegmentChangeLog(Base):
+    """变更记录（GLOSSARY）：某段落经润色或增强前后对照的审计条目，只写不改。
+
+    与段落行的区分：Segment.source_text 是输入暂存（enhance 阶段会被
+    Worker 以润色产物覆盖），本表是只增不改的审计事实——每段每阶段完成
+    时由 Worker 写入一行 before/after，客诉与"每段改了什么"（spec #15
+    用户故事 10）以此为准。寻址沿用 (session_id, stage, seq)，与段落行
+    一一对应；before_text 即该次调用实际发给 LLM 的输入。
+    """
+
+    __tablename__ = "segment_change_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("optimization_sessions.id"), index=True, nullable=False
+    )
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_text: Mapped[str] = mapped_column(Text, nullable=False)
+    after_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ux_segment_change_logs_session_stage_seq", "session_id", "stage", "seq", unique=True),
+    )
+
+
 class SavedSpec(Base):
     """用户保存的排版规格（GLOSSARY：排版规格），Word Formatter 复用（M4 接入）。
 

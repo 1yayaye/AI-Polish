@@ -33,5 +33,12 @@ class Settings(BaseSettings):
     # TestClient 等非浏览器客户端不豁免）
     admin_cookie_secure: bool = True
 
+    # 模型接入（ADR-0005：运营商自备，全部来自 .env，无任何数据库配置路径；
+    # 会话表只落只读 model_snapshot，不落 key/base_url）。三项齐备才启动
+    # 润色 Worker，缺项视为"流水线未配置"（本地开发/纯计费部署可安全跳过）。
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+
 
 settings = Settings()
