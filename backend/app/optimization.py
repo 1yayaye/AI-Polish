@@ -36,6 +36,11 @@ MODE_ENHANCE = "paper_enhance"
 MODE_POLISH_ENHANCE = "paper_polish_enhance"
 Mode = Literal["paper_polish", "paper_enhance", "paper_polish_enhance"]
 
+# 会话状态词表（OptimizationSession.status 的合法取值，词表归本模块所有）。
+# 管理端会话查询的过滤参数复用同一 Literal：非法值由 FastAPI 统一映射 422，
+# 监控页不可能筛出词表之外的状态。
+SessionStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+
 STAGE_POLISH = "polish"
 STAGE_ENHANCE = "enhance"
 
@@ -323,10 +328,11 @@ def _to_summary(row: OptimizationSession) -> SessionSummaryOut:
 
 
 # 段落展示顺序：润色阶段先于增强阶段（字典序相反，显式排序）。
-# 段落表与变更记录表共用这一排序契约，由 _stage_order_for 施加到各自的 stage 列。
+# 段落表与变更记录表共用这一排序契约，由 stage_order_for 施加到各自的
+# stage 列；管理端会话详情的段落状态列表沿用同一顺序。
 
 
-def _stage_order_for(column):  # type: ignore[no-untyped-def]
+def stage_order_for(column):  # type: ignore[no-untyped-def]
     return case((column == STAGE_ENHANCE, 1), else_=0)
 
 
@@ -335,7 +341,7 @@ def _session_out(session: Session, row: OptimizationSession) -> SessionOut:
     segments = session.execute(
         select(Segment)
         .where(Segment.session_id == row.id)
-        .order_by(_stage_order_for(Segment.stage), Segment.seq)
+        .order_by(stage_order_for(Segment.stage), Segment.seq)
     ).scalars()
     return SessionOut(
         id=row.id,
@@ -422,7 +428,7 @@ def my_session_changes(
     logs = session.execute(
         select(SegmentChangeLog)
         .where(SegmentChangeLog.session_id == row.id)
-        .order_by(_stage_order_for(SegmentChangeLog.stage), SegmentChangeLog.seq)
+        .order_by(stage_order_for(SegmentChangeLog.stage), SegmentChangeLog.seq)
     ).scalars()
     return [
         ChangeOut(stage=log.stage, seq=log.seq, before_text=log.before_text, after_text=log.after_text)

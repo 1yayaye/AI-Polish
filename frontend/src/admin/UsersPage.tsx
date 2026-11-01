@@ -354,7 +354,7 @@ export default function UsersPage() {
           {
             title: '操作',
             key: 'actions',
-            width: 260,
+            width: 330,
             render: (_, user) => (
               <Space>
                 <Button
@@ -368,6 +368,9 @@ export default function UsersPage() {
                 </Button>
                 <Button size="small" onClick={() => navigate(`/admin/users/${user.id}`)}>
                   流水
+                </Button>
+                <Button size="small" onClick={() => navigate(`/admin/sessions?user_id=${user.id}`)}>
+                  会话
                 </Button>
               </Space>
             ),

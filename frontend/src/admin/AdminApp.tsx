@@ -14,6 +14,7 @@ import {
 import { NavLink, Route, Routes } from 'react-router-dom'
 import { AdminError, adminLogin, adminLogout, getAdminSession, onUnauthorized } from './api'
 import LedgerPage from './LedgerPage'
+import SessionsPage from './SessionsPage'
 import UsersPage from './UsersPage'
 
 /**
@@ -153,6 +154,14 @@ export default function AdminApp() {
             >
               全局流水
             </NavLink>
+            <NavLink
+              to="/admin/sessions"
+              style={({ isActive }) => ({
+                color: isActive ? '#fff' : 'rgba(255,255,255,0.65)',
+              })}
+            >
+              会话监控
+            </NavLink>
           </Space>
           <span style={{ color: 'rgba(255,255,255,0.65)', marginLeft: 'auto' }}>
             {view.username}
@@ -164,7 +173,9 @@ export default function AdminApp() {
             <Route index element={<UsersPage />} />
             <Route path="users/:userId" element={<LedgerPage />} />
             <Route path="ledger" element={<LedgerPage />} />
-            {/* 会话监控/配置面等其余运营功能由 M3 后续票接入 */}
+            <Route path="sessions" element={<SessionsPage />} />
+            <Route path="sessions/:sessionId" element={<SessionsPage />} />
+            {/* 配置面/提示词管理等其余运营功能由 M3 后续票接入 */}
           </Routes>
         </Layout.Content>
       </Layout>

@@ -1,4 +1,5 @@
-"""管理端（运营商后台）API：登录认证、卡密批量生成、用户列表、账本流水查询。
+"""管理端（运营商后台）API：登录认证、卡密批量生成、用户列表、账本流水查询、
+会话监控（列表/详情，只读）。
 
 认证模型：管理凭据只来自 .env（ADR-0005，改凭据 = 改文件 + 重启，不存在
 后台改密码的路径）。登录成功签发 HS256 JWT 存入 HttpOnly cookie，后续请求
@@ -17,16 +18,16 @@ from functools import reduce
 from typing import Annotated
 
 import jwt
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session
 
-from app import billing
+from app import billing, optimization
 from app.billing import BillingError, InsufficientBalance
 from app.config import settings
 from app.db import get_session
-from app.models import LedgerEntry, User, mask_card_key
+from app.models import LedgerEntry, OptimizationSession, Segment, User, mask_card_key
 
 router = APIRouter(prefix="/api/admin")
 
@@ -430,3 +431,190 @@ def list_user_ledger(
     ledger_page = _ledger_page(session, page, page_size, user_id=user_id)
     ledger_page.card_key = mask_card_key(user.card_key)
     return ledger_page
+
+
+# ---- 会话监控（issue #28，只读接口）----
+#
+# 监控页回答两个问题：系统此刻在跑什么（列表），以及客诉时"这次用的是
+# 哪个模型、坏在哪一段、钱退了没"（详情）。两个接口都纯只读：不写会话/
+# 段落/账本，不触发任何状态迁移或退款——页面看到的就是数据库此刻的状态，
+# 变动只来自 Worker/用户端/计费服务各自的写路径。
+
+
+class AdminSessionSummary(BaseModel):
+    """会话列表行：所属用户以脱敏卡密展示（运营商凭它把会话对上人，
+    规则随卡密概念拥有，见 models.mask_card_key）；计费字段与会话表同源只读。"""
+
+    id: int
+    user_id: int
+    card_key: str
+    status: str
+    mode: str
+    word_count: int
+    charged_fen: int
+    model_snapshot: str | None
+    created_at: datetime
+
+
+class AdminSessionPage(BaseModel):
+    """会话分页（新会话在前）。total 为过滤后的会话总数，供前端换算总页数。"""
+
+    items: list[AdminSessionSummary]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/sessions")
+def list_sessions(
+    page: Annotated[int, Field(ge=1)] = 1,
+    page_size: Annotated[int, Field(ge=1, le=100)] = 20,
+    status: Annotated[optimization.SessionStatus | None, Query()] = None,
+    user_id: Annotated[int | None, Query(ge=1)] = None,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminSessionPage:
+    """会话分页列表，可按状态与所属用户过滤（spec #15 用户故事 10-11）。
+
+    user_id 过滤是客诉排查闭环的最后一跳：凭卡密片段在用户列表找到人后，
+    从用户行直达他的会话与当时的模型。状态词表复用
+    app.optimization.SessionStatus（词表归会话模块所有），词表外的取值由
+    FastAPI 映射 422。
+    """
+    conditions = []
+    if status is not None:
+        conditions.append(OptimizationSession.status == status)
+    if user_id is not None:
+        conditions.append(OptimizationSession.user_id == user_id)
+    where = reduce(and_, conditions) if conditions else true()
+    total = session.execute(
+        select(func.count()).select_from(OptimizationSession).where(where)
+    ).scalar_one()
+    rows = session.execute(
+        select(OptimizationSession, User.card_key)
+        .join(User, User.id == OptimizationSession.user_id)
+        .where(where)
+        .order_by(OptimizationSession.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return AdminSessionPage(
+        items=[
+            AdminSessionSummary(
+                id=row.id,
+                user_id=row.user_id,
+                card_key=mask_card_key(card_key),
+                status=row.status,
+                mode=row.mode,
+                word_count=row.word_count,
+                charged_fen=row.charged_fen,
+                model_snapshot=row.model_snapshot,
+                created_at=row.created_at,
+            )
+            for row, card_key in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+class AdminSegmentStatus(BaseModel):
+    """段落阶段状态：状态机取值 pending/completed/failed，含失败段落
+    （客诉时判断故障发生在哪一段）。"""
+
+    stage: str
+    seq: int
+    status: str
+
+
+class AdminSessionLedgerRow(BaseModel):
+    """该会话的账本行（task_id 即会话 id）：只有预扣 charge 与退款 refund
+    两类与任务相关。退款行是否存在即"退款是否已落账"——账本是资金变动的
+    唯一事实源，这里不另造冗余的退款状态字段。"""
+
+    id: int
+    kind: str
+    amount_fen: int
+    balance_after_fen: int
+    reason: str
+    created_at: datetime
+
+
+class AdminSessionDetail(BaseModel):
+    """会话详情：列表行全量字段 + 各段落阶段状态 + 该会话的账本行。"""
+
+    id: int
+    user_id: int
+    card_key: str
+    status: str
+    mode: str
+    word_count: int
+    charged_fen: int
+    model_snapshot: str | None
+    created_at: datetime
+    updated_at: datetime
+    segments: list[AdminSegmentStatus]
+    ledger: list[AdminSessionLedgerRow]
+
+
+@router.get("/sessions/{session_id}")
+def get_session_detail(
+    session_id: int,
+    _admin: str = Depends(get_current_admin),
+    session: Session = Depends(get_session),
+) -> AdminSessionDetail:
+    """单个会话的监控详情（spec #15 用户故事 12-14）：
+
+    - model_snapshot 只读展示当时实际用的模型（Worker 认领时一次写入，
+      queued 期为 None——还没认领就没有模型可看）；
+    - 段落阶段状态润色段在前、段内按序号（与用户端同一排序契约
+      optimization.stage_order_for），失败段落原样可见；
+    - 账本行按 id 正序即时间正序：先预扣后退款。
+
+    会话不存在 404。纯只读：不写任何表、不触发状态迁移或退款。
+    """
+    row = session.get(OptimizationSession, session_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="会话不存在")
+    card_key = session.scalar(select(User.card_key).where(User.id == row.user_id))
+    segments = session.execute(
+        select(Segment)
+        .where(Segment.session_id == session_id)
+        .order_by(optimization.stage_order_for(Segment.stage), Segment.seq)
+    ).scalars()
+    ledger_rows = session.execute(
+        select(LedgerEntry)
+        .where(
+            LedgerEntry.task_id == session_id,
+            LedgerEntry.kind.in_([billing.KIND_CHARGE, billing.KIND_REFUND]),
+        )
+        .order_by(LedgerEntry.id)
+    ).scalars()
+    return AdminSessionDetail(
+        id=row.id,
+        user_id=row.user_id,
+        card_key=mask_card_key(card_key),
+        status=row.status,
+        mode=row.mode,
+        word_count=row.word_count,
+        charged_fen=row.charged_fen,
+        model_snapshot=row.model_snapshot,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        segments=[
+            AdminSegmentStatus(stage=s.stage, seq=s.seq, status=s.status)
+            for s in segments
+        ],
+        ledger=[
+            AdminSessionLedgerRow(
+                id=e.id,
+                kind=e.kind,
+                amount_fen=e.amount_fen,
+                balance_after_fen=e.balance_after_fen,
+                reason=e.reason,
+                created_at=e.created_at,
+            )
+            for e in ledger_rows
+        ],
+    )

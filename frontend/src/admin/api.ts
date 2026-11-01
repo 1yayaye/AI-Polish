@@ -203,3 +203,78 @@ export function listUserLedger(
   })
   return request(`/api/admin/users/${userId}/ledger?${query.toString()}`)
 }
+
+// ---- 会话监控（issue #28，只读接口）----
+
+export type AdminSessionStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/** 会话列表行：card_key 为所属用户的脱敏卡密。 */
+export interface AdminSessionSummary {
+  id: number
+  user_id: number
+  card_key: string
+  status: AdminSessionStatus
+  mode: string
+  word_count: number
+  charged_fen: number
+  model_snapshot: string | null
+  created_at: string
+}
+
+export interface AdminSessionPage {
+  items: AdminSessionSummary[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface AdminSegmentStatus {
+  stage: string
+  seq: number
+  status: string
+}
+
+/** 该会话的账本行：kind 只有 charge（预扣）与 refund（退款），退款行存在即已落账。 */
+export interface AdminSessionLedgerRow {
+  id: number
+  kind: string
+  amount_fen: number
+  balance_after_fen: number
+  reason: string
+  created_at: string
+}
+
+export interface AdminSessionDetail extends AdminSessionSummary {
+  updated_at: string
+  segments: AdminSegmentStatus[]
+  ledger: AdminSessionLedgerRow[]
+}
+
+/**
+ * 会话分页列表，可按状态与所属用户过滤（均省略 = 不过滤）。只读接口：
+ * 不触发任何状态迁移或退款，页面看到的就是数据库此刻的状态。
+ */
+export function listSessions(params: {
+  page: number
+  page_size: number
+  status?: AdminSessionStatus
+  user_id?: number
+}): Promise<AdminSessionPage> {
+  const query = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.page_size),
+  })
+  if (params.status) query.set('status', params.status)
+  if (params.user_id !== undefined) query.set('user_id', String(params.user_id))
+  return request(`/api/admin/sessions?${query.toString()}`)
+}
+
+/** 单个会话的监控详情（model_snapshot + 段落阶段状态 + 该会话账本行）。 */
+export function getAdminSessionDetail(sessionId: number): Promise<AdminSessionDetail> {
+  return request(`/api/admin/sessions/${sessionId}`)
+}
