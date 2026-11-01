@@ -96,6 +96,38 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
     return LoginResponse(username=body.username)
 
 
+class SessionResponse(BaseModel):
+    """当前管理会话归属。前端外壳启动时经此区分登录态：200 即已登录，
+    401 即未登录/已过期，回登录表单——不靠尝试业务接口探測登录态。"""
+
+    username: str
+
+
+@router.get("/session")
+def read_session(admin: str = Depends(get_current_admin)) -> SessionResponse:
+    return SessionResponse(username=admin)
+
+
+class LogoutResponse(BaseModel):
+    ok: bool
+
+
+@router.post("/logout")
+def logout(
+    response: Response,
+    _admin: str = Depends(get_current_admin),
+) -> LogoutResponse:
+    """主动登出：清除会话 cookie（属性与签发时一致，浏览器才会真正丢弃）。
+    已过期会话登出会得到 401，cookie 里的 JWT 本就已失效，行为等价。"""
+    response.delete_cookie(
+        _COOKIE_NAME,
+        secure=settings.admin_cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+    return LogoutResponse(ok=True)
+
+
 class CardKeyBatchRequest(BaseModel):
     """批量发卡参数：数量与初始双轨额度（余额分 + 次数上限），次数已用归零。"""
 

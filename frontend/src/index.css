@@ -26,6 +26,14 @@ body {
   margin-bottom: 0.5rem;
 }
 
+/* 管理后台的启动/登录视图（AdminApp）：全屏居中一张卡片 */
+.admin-boot {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .hint {
   color: #6b7280;
   margin-bottom: 1.5rem;

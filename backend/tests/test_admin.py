@@ -96,6 +96,65 @@ def test_tampered_session_cookie_rejected(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+# ---- 会话检查与登出 ----
+
+
+def test_session_reports_current_admin(logged_in_client: TestClient) -> None:
+    response = logged_in_client.get("/api/admin/session")
+
+    assert response.status_code == 200
+    assert response.json() == {"username": ADMIN_USERNAME}
+
+
+def test_session_requires_login(client: TestClient) -> None:
+    """外壳启动时用 401/200 区分登录态：无 cookie 一律 401（不区分原因）。"""
+    assert client.get("/api/admin/session").status_code == 401
+
+
+def test_expired_session_cookie_rejected(
+    client: TestClient, admin_credentials: None
+) -> None:
+    """12 小时 TTL 过期（exp 已过）的会话等同未登录，管理接口一律 401。"""
+    import time
+
+    import jwt
+
+    from app.config import settings
+
+    now = int(time.time())
+    expired = jwt.encode(
+        {
+            "sub": ADMIN_USERNAME,
+            "iat": now - 12 * 3600 - 60,
+            "exp": now - 60,
+        },
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+    client.cookies.set(COOKIE_NAME, expired)
+
+    assert client.get("/api/admin/session").status_code == 401
+    assert client.get("/api/admin/users").status_code == 401
+
+
+def test_logout_clears_cookie_and_revokes_session(logged_in_client: TestClient) -> None:
+    assert logged_in_client.get("/api/admin/users").status_code == 200
+
+    response = logged_in_client.post("/api/admin/logout")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    set_cookie = response.headers["set-cookie"]
+    assert f"{COOKIE_NAME}=" in set_cookie
+    assert "max-age=0" in set_cookie.lower()  # 删除指令：浏览器随即丢弃 cookie
+    # 登出后再访问管理接口回到未认证（401），前端据此回到登录表单
+    assert logged_in_client.get("/api/admin/users").status_code == 401
+
+
+def test_logout_requires_session(client: TestClient) -> None:
+    assert client.post("/api/admin/logout").status_code == 401
+
+
 # ---- 批量发卡 ----
 
 
