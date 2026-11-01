@@ -12,7 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
 from app import billing
@@ -224,6 +224,9 @@ def test_refund_race_after_prior_changes_raises_refund_conflict(
     """
     session = db_session_factory()
     try:
+        # 金额守卫先于 flush：task 203 必须真有一笔等额原扣款，竞争才能走到唯一索引
+        billing.charge(session, funded_user.id, 500, task_id=203, reason="预扣费")
+        session.commit()
         billing.adjust_balance(session, funded_user.id, 1000, reason="客户补偿")
         session.add(
             LedgerEntry(
@@ -241,8 +244,9 @@ def test_refund_race_after_prior_changes_raises_refund_conflict(
     finally:
         session.close()
 
-    # 调用方回滚后：竞争双方的 refund 行都没有落库，余额回到起点
-    assert _balance(db_session_factory, funded_user.id) == 12500
+    # 调用方回滚后：竞争双方的 refund 行都没有落库；留在库里的只有事前
+    # 提交的原扣款（task 203），adjust 与注入行一并被回滚，余额 12500-500
+    assert _balance(db_session_factory, funded_user.id) == 12000
     assert [r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND] == []
     assert_ledger_reconciles(db_session_factory, funded_user.id)
 
@@ -511,3 +515,123 @@ def test_charge_unknown_user_fails_without_ledger_row(db_session_factory: sessio
         session.rollback()
     finally:
         session.close()
+
+
+# ---- 退款金额守卫（issue #13）----
+
+
+def test_refund_rejects_amount_mismatch_without_any_change(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """错额退款（多退/少退）被拒且零变动：不写账本、不动余额。"""
+    session = db_session_factory()
+    try:
+        billing.charge(session, funded_user.id, 500, task_id=501, reason="预扣费")
+        session.commit()
+        with pytest.raises(BillingError):
+            billing.refund(session, funded_user.id, 300, task_id=501, reason="少退被拒")
+        session.rollback()
+        with pytest.raises(BillingError):
+            billing.refund(session, funded_user.id, 600, task_id=501, reason="多退被拒")
+        session.rollback()
+    finally:
+        session.close()
+
+    assert _balance(db_session_factory, funded_user.id) == 12000
+    assert [r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND] == []
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_refund_exact_charge_amount_succeeds(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """与原扣款等额的退款恰好生效一次：余额回到扣费前。"""
+    session = db_session_factory()
+    try:
+        billing.charge(session, funded_user.id, 500, task_id=502, reason="预扣费")
+        session.commit()
+        ok = billing.refund(session, funded_user.id, 500, task_id=502, reason="任务失败退款")
+        session.commit()
+    finally:
+        session.close()
+
+    assert ok is True
+    assert _balance(db_session_factory, funded_user.id) == 12500
+    (refund_row,) = [
+        r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND
+    ]
+    assert refund_row.amount_fen == 500
+    assert refund_row.task_id == 502
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_refund_twice_with_correct_amount_still_idempotent(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """正确金额的二次退款仍被 once-per-task 幂等守卫拒绝。"""
+    session = db_session_factory()
+    try:
+        billing.charge(session, funded_user.id, 500, task_id=503, reason="预扣费")
+        session.commit()
+        assert billing.refund(session, funded_user.id, 500, task_id=503, reason="首次退款") is True
+        session.commit()
+        assert billing.refund(session, funded_user.id, 500, task_id=503, reason="重复退款") is False
+        session.commit()
+    finally:
+        session.close()
+
+    assert _balance(db_session_factory, funded_user.id) == 12500
+    assert len([
+        r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND
+    ]) == 1
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_refund_task_without_charge_row_raises_billing_error(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """无原 charge 行的 task（从未预扣费）退款视为编程错误，零变动。"""
+    session = db_session_factory()
+    try:
+        with pytest.raises(BillingError):
+            billing.refund(session, funded_user.id, 100, task_id=504, reason="无扣款退款")
+        session.rollback()
+    finally:
+        session.close()
+
+    assert _balance(db_session_factory, funded_user.id) == 12500
+    assert [r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND] == []
+    assert_ledger_reconciles(db_session_factory, funded_user.id)
+
+
+def test_refund_legacy_migrated_refund_row_unaffected(
+    db_session_factory: sessionmaker, funded_user: User
+) -> None:
+    """迁移旧 refund 行（带偏移 task_id、无对应 charge）不受金额守卫影响：
+    幂等守卫先于守卫查询命中，refund 返回 False 而非报错，且不写任何新行。"""
+    legacy_task_id = 1_000_000_000 + 7  # 迁移脚本的 LEGACY_TASK_ID_OFFSET 偏移
+    session = db_session_factory()
+    try:
+        session.add(
+            LedgerEntry(
+                user_id=funded_user.id,
+                task_id=legacy_task_id,
+                kind=billing.KIND_REFUND,
+                amount_fen=123,
+                balance_after_fen=12623,
+                reason="旧库迁入的退款行",
+            )
+        )
+        # 迁移态本身对账一致：余额与账本同步含这笔旧退款（仅测试构造迁移态）
+        session.execute(update(User).where(User.id == funded_user.id).values(balance_fen=12623))
+        session.commit()
+        again = billing.refund(session, funded_user.id, 123, task_id=legacy_task_id, reason="旧流水重复退款")
+        session.commit()
+    finally:
+        session.close()
+
+    assert again is False
+    assert len([
+        r for r in _ledger(db_session_factory, funded_user.id) if r.kind == billing.KIND_REFUND
+    ]) == 1
+    assert_ledger_reconciles(db_session_factory, funded_user.id)

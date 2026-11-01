@@ -115,6 +115,81 @@ class CustomPrompt(Base):
     )
 
 
+class OptimizationSession(Base):
+    """优化会话（GLOSSARY：会话）：用户提交的一次完整润色任务。
+
+    状态机（唯一事实源，ADR-0003）：queued → running → completed/failed，
+    queued/running 可 cancelled。全部状态迁移由会话模块（app.optimization）
+    与 Worker 拥有，其他模块只读。
+
+    计费字段：
+    - word_count：预扣费依据的计费字数（去空白字符数），创建时一次写入。
+    - charged_fen：预扣金额（GLOSSARY：预扣费）。取消/失败的退款金额以
+      本字段为准，与账本原 charge 行互为对账。
+
+    model_snapshot 只读：记录当时实际使用的模型（运营商客诉排查用，
+    spec #15 用户故事 12），由 Worker 认领会话时一次写入；queued 期为空。
+    不设任何 *_api_key / *_base_url 列——模型接入只来自 .env（ADR-0005）。
+    """
+
+    __tablename__ = "optimization_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    # queued / running / completed / failed / cancelled
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True, nullable=False)
+    # 处理模式（GLOSSARY）：paper_polish / paper_enhance / paper_polish_enhance
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    original_text: Mapped[str] = mapped_column(Text, nullable=False)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    charged_fen: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_snapshot: Mapped[str | None] = mapped_column(String(255))
+    # Worker 续跑重试计数（僵尸恢复协议，spec #15；T2/T5 接入）
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+
+class Segment(Base):
+    """段落（GLOSSARY：段落）：流水线处理的最小文本单元。
+
+    会话创建时按处理模式切分落库：polish 阶段行总是存在，enhance 阶段行
+    仅在模式含增强时创建（阶段归属见 stage）。enhance 行的 source_text
+    创建时先存原文占位，Worker 在润色完成后以其结果覆盖（增强在润色产物
+    上进行）——状态机的事实源仍是 status，source_text 只是输入暂存。
+
+    - status：pending / completed / failed（ADR-0003：按段断点续跑）。
+    - (session_id, stage, seq) 唯一：同会话同阶段内序号即处理顺序。
+    """
+
+    __tablename__ = "segments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("optimization_sessions.id"), index=True, nullable=False
+    )
+    # 流水线阶段：'polish'（润色）/ 'enhance'（原创性增强）
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    result_text: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ux_segments_session_stage_seq", "session_id", "stage", "seq", unique=True),
+    )
+
+
 class SavedSpec(Base):
     """用户保存的排版规格（GLOSSARY：排版规格），Word Formatter 复用（M4 接入）。
 

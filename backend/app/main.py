@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from app.admin import router as admin_router
 from app.api import router
+from app.optimization import router as optimization_router
 
 app = FastAPI(
     title="AI-Polish",
@@ -16,6 +17,7 @@ app = FastAPI(
 )
 app.include_router(router)
 app.include_router(admin_router)
+app.include_router(optimization_router)
 
 
 @app.get("/health")

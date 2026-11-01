@@ -19,7 +19,7 @@
 - task_id：charge/refund 必传（新流水一律可追溯到任务）；usage 三个操作
   （预留/释放/额度调整）可空（Word Formatter 任务可能无任务行）。
 
-## 退款幂等（崩溃重试不双倍退款）
+## 退款幂等与金额守卫（崩溃重试不双倍退款、不错额退款）
 
 "已退款"状态持久化在账本里：部分唯一索引 ux_ledger_refund_once_per_task
 保证每个 task 至多一条 refund 行。refund 先查守卫（对方的退款行在本事务
@@ -27,6 +27,11 @@
 检查之后对方才提交同 task 退款）时抛 :class:`RefundConflict`：本事务里
 可能已有调用方的其他未提交变动，refund 无权替调用方回滚（静默回滚会把这些
 变动一并吞掉），由调用方显式放弃整个事务。
+
+refund 同时校验金额：先查该 task 的原 charge 账本行，要求 amount_fen 恰好
+等于原扣减额——错额退款被拒绝且零变动。找不到 charge 行（该 task 从未
+预扣费，含迁移进来的旧流水 task）视为编程错误抛 :class:`BillingError`：
+refund 只服务新流水。每个 task 恰好一次 charge 由任务状态机（调用方）保证。
 
 非资金错误（释放超过预留量、金额非正）按编程错误抛 ValueError，不设
 专门的恢复路径——调用方写错了就该当场炸出来。
@@ -149,8 +154,10 @@ def refund(session: Session, user_id: int, amount_fen: int, *, task_id: int, rea
 
     返回 True 表示本次调用完成了退款；False 表示该 task 已退过（幂等：
     对方的退款行在本事务可见）。竞争输掉（守卫检查之后对方才提交）抛
-    RefundConflict，调用方须回滚整个事务。amount_fen 必须为正且等于原
-    扣减额。见模块级"退款幂等"一节。
+    RefundConflict，调用方须回滚整个事务。amount_fen 必须为正且等于该
+    task 的原 charge 扣减额：错额抛 BillingError 且零变动，无 charge 行
+    （该 task 从未预扣费）同样抛 BillingError。见模块级"退款幂等与金额
+    守卫"一节。
     """
     if amount_fen <= 0:
         raise ValueError(f"refund amount must be positive, got {amount_fen}")
@@ -161,6 +168,23 @@ def refund(session: Session, user_id: int, amount_fen: int, *, task_id: int, rea
     ).first()
     if already_refunded is not None:
         return False
+    # 同事务内 charge 后立即 refund（如取消未开跑的会话）时，charge 行还在
+    # 待 flush 区（autoflush=False 的守卫查询看不见它）——显式 flush 落库后
+    # 下方金额守卫才能查到本次事务自己的扣款行。
+    session.flush()
+    charge_row = session.execute(
+        select(LedgerEntry)
+        .where(LedgerEntry.task_id == task_id, LedgerEntry.kind == KIND_CHARGE)
+        .order_by(LedgerEntry.id)
+        .limit(1)
+    ).scalar_one_or_none()
+    if charge_row is None:
+        raise BillingError(f"退款失败：task {task_id} 无原扣款账本行，拒绝退款")
+    if amount_fen != -charge_row.amount_fen:
+        raise BillingError(
+            f"退款失败：金额 {amount_fen} 分与 task {task_id} 的原扣款"
+            f"{-charge_row.amount_fen} 分不一致"
+        )
     balance_after = _adjust_balance(session, user_id, amount_fen, min_balance=None)
     if balance_after is None:
         raise BillingError(f"退款失败：用户 {user_id} 不存在")
