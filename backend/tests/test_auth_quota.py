@@ -22,6 +22,15 @@ def test_invalid_card_key_rejected(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_missing_and_invalid_401_bodies_identical(client: TestClient) -> None:
+    """缺失与无效卡密的 401 响应体逐字节一致（auth.py 契约：不区分两种失败）。"""
+    missing = client.get("/api/me/quota")
+    invalid = client.get("/api/me/quota", headers={"X-Card-Key": "no-such-key"})
+
+    assert missing.status_code == invalid.status_code == 401
+    assert missing.content == invalid.content
+
+
 def test_empty_card_key_rejected(client: TestClient) -> None:
     response = client.get("/api/me/quota", headers={"X-Card-Key": ""})
 

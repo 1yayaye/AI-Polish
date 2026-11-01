@@ -23,17 +23,12 @@ def get_current_user(
     session: Session = Depends(get_session),
 ) -> User:
     """从 X-Card-Key header 解析当前用户；缺失或无效一律 401。"""
+    # 缺失与无效共用同一 detail：探测者无法从响应体区分失败类型（见模块级 docstring）
     if not card_key:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail="缺少卡密，请在 X-Card-Key 请求头中提供",
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="卡密缺失或无效")
     user = session.execute(
         select(User).where(User.card_key == card_key)
     ).scalar_one_or_none()
     if user is None:
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail="卡密无效",
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="卡密缺失或无效")
     return user
