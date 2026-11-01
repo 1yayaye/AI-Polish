@@ -20,6 +20,7 @@ from app.config import settings
 from app.llm import LLMContentError, LLMTransientError
 import app.main as app_main
 from app.models import (
+    CustomPrompt,
     LedgerEntry,
     OptimizationSession,
     Segment,
@@ -657,6 +658,195 @@ def test_cancel_during_running_stops_worker_without_double_refund(
     ]
     assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN  # 取消退款到账
     assert len(_refund_rows(db_session_factory, session_id)) == 1  # 不双倍退款
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+# ---- 提示词解析：用户自定义默认优先，回落系统级解析 ----
+
+
+def _insert_prompt(
+    db_session_factory: sessionmaker,
+    user_id: int,
+    *,
+    stage: str,
+    content: str,
+    is_default: bool = False,
+    is_active: bool = True,
+    updated_at: datetime | None = None,
+) -> None:
+    session = db_session_factory()
+    try:
+        row = CustomPrompt(
+            user_id=user_id,
+            name=f"prompt-{stage}-{content[:6]}",
+            stage=stage,
+            content=content,
+            is_default=is_default,
+            is_active=is_active,
+        )
+        if updated_at is not None:
+            row.updated_at = updated_at
+        session.add(row)
+        session.commit()
+    finally:
+        session.close()
+
+
+def _sys_worker(llm: ScriptedLLM, db_session_factory: sessionmaker) -> worker_mod.PipelineWorker:
+    """直接构造 Worker（不覆盖用户解析路径），系统回落映射 sys:{stage}。"""
+    return worker_mod.PipelineWorker(
+        db_session_factory, llm, prompt_for=lambda stage: f"sys:{stage}"
+    )
+
+
+def test_user_custom_default_prompt_used_for_its_stage_system_fallback_elsewhere(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    """polish 阶段有启用的自定义默认行：polish 段收到该正文，enhance 段
+    回落系统级提示词（每阶段解析一次）。"""
+    user = funded_user()
+    _insert_prompt(
+        db_session_factory, user.id, stage="polish", content="用户默认润色", is_default=True
+    )
+    session_id = _create_queued(
+        db_session_factory, user, "第一段。\n\n第二段。", "paper_polish_enhance"
+    )
+    llm = ScriptedLLM(
+        {
+            ("用户默认润色", 0): "润色0",
+            ("用户默认润色", 1): "润色1",
+            ("sys:enhance", 0): "增强0",
+            ("sys:enhance", 1): "增强1",
+        }
+    )
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert _session_row(db_session_factory, session_id).status == "completed"
+    assert [call[0] for call in llm.calls] == [
+        "用户默认润色",
+        "用户默认润色",
+        "sys:enhance",
+        "sys:enhance",
+    ]
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_without_custom_rows_every_stage_falls_back_to_system_prompt(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    user = funded_user()
+    session_id = _create_queued(
+        db_session_factory, user, "第一段。\n\n第二段。", "paper_polish_enhance"
+    )
+    llm = ScriptedLLM(
+        {
+            ("sys:polish", 0): "润色0",
+            ("sys:polish", 1): "润色1",
+            ("sys:enhance", 0): "增强0",
+            ("sys:enhance", 1): "增强1",
+        }
+    )
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert _session_row(db_session_factory, session_id).status == "completed"
+    assert [call[0] for call in llm.calls] == [
+        "sys:polish",
+        "sys:polish",
+        "sys:enhance",
+        "sys:enhance",
+    ]
+
+
+def test_inactive_custom_default_falls_back(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    user = funded_user()
+    _insert_prompt(
+        db_session_factory,
+        user.id,
+        stage="polish",
+        content="已停用默认",
+        is_default=True,
+        is_active=False,
+    )
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("sys:polish", 0): "润色0"})
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert [call[0] for call in llm.calls] == ["sys:polish"]
+
+
+def test_non_default_custom_prompt_falls_back(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    user = funded_user()
+    _insert_prompt(db_session_factory, user.id, stage="polish", content="普通自定义", is_default=False)
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("sys:polish", 0): "润色0"})
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert [call[0] for call in llm.calls] == ["sys:polish"]
+
+
+def test_other_users_default_prompt_does_not_leak(
+    make_user: Callable[..., User],
+    funded_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+) -> None:
+    other = make_user(card_key="card-prompt-other")
+    _insert_prompt(
+        db_session_factory, other.id, stage="polish", content="他人默认", is_default=True
+    )
+    user = funded_user()
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("sys:polish", 0): "润色0"})
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert [call[0] for call in llm.calls] == ["sys:polish"]
+
+
+def test_dirty_double_default_takes_latest_updated_at(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    """违反"至多一个默认"不变量的脏数据：读取端按 updated_at 最新优先，选取确定。"""
+    user = funded_user()
+    _insert_prompt(
+        db_session_factory,
+        user.id,
+        stage="polish",
+        content="旧默认",
+        is_default=True,
+        updated_at=datetime(2026, 1, 1),
+    )
+    _insert_prompt(db_session_factory, user.id, stage="polish", content="新默认", is_default=True)
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("新默认", 0): "润色0"})
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    assert [call[0] for call in llm.calls] == ["新默认"]
+
+
+def test_custom_default_prompt_does_not_disturb_billing(
+    funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    """提示词不影响资金：预扣与成功收场与系统提示词路径完全一致。"""
+    user = funded_user()
+    _insert_prompt(db_session_factory, user.id, stage="polish", content="用户默认润色", is_default=True)
+    session_id = _create_queued(db_session_factory, user, "第一段。", "paper_polish")
+    llm = ScriptedLLM({("用户默认润色", 0): "润色0"})
+
+    assert asyncio.run(_sys_worker(llm, db_session_factory).process_next()) is True
+
+    row = _session_row(db_session_factory, session_id)
+    assert row.status == "completed"
+    assert _balance_fen(db_session_factory, user.id) == INITIAL_BALANCE_FEN - row.charged_fen
+    assert _refund_rows(db_session_factory, session_id) == []
     assert_ledger_reconciles(db_session_factory, user.id)
 
 

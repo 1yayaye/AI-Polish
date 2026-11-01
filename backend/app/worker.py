@@ -11,6 +11,11 @@ app.db 短事务纪律——**LLM 等待期间零写事务**，每段按"短事�
 暂存（增强在润色产物上进行，app.models.Segment 契约），并写一行变更记录
 （GLOSSARY：变更记录，段落级 before/after）。
 
+提示词解析（每阶段一次，非每段落）：该用户在该阶段启用的自定义默认提示词
+（custom_prompts 的 default 行，见 :meth:`_custom_default_prompt`）优先，
+无则回落系统种子（:func:`_system_prompt_for`）。断点续跑重入 :meth:`_process`
+时重新解析——用户中途改默认提示词会影响续跑段落，属可接受语义。
+
 失败语义：
 - LLM 调用抛 :class:`app.llm.LLMError`（内容性错误，或瞬时错误重试耗尽）：
   终态归属与全额退款走 :func:`optimization.finalize_with_refund`（条件
@@ -43,7 +48,7 @@ from sqlalchemy.orm import Session
 from app import optimization, seeds, stream
 from app.db import short_tx
 from app.llm import LLMError
-from app.models import OptimizationSession, Segment, SegmentChangeLog
+from app.models import CustomPrompt, OptimizationSession, Segment, SegmentChangeLog
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +63,10 @@ class SegmentPolisher(Protocol):
 
 @functools.lru_cache(maxsize=1)
 def _system_prompt_for(stage: str) -> str:
-    """默认阶段提示词：取系统种子（代码固化的运营商调优资产）中该阶段的
-    默认启用条目。用户自定义默认提示词的消费归 T3 编排，经构造参数替换。"""
+    """系统级回落提示词：取系统种子（代码固化的运营商调优资产）中该阶段
+    的默认启用条目。仅当该用户在该阶段无启用的自定义默认提示词时使用
+    （见 _process 与 _custom_default_prompt）；构造参数 prompt_for 可整体
+    替换本回落解析（测试接缝）。"""
     for item in seeds.load_system_prompts():
         if item["stage"] == stage and item.get("is_default", True) and item.get("is_active", True):
             return item["content"]
@@ -110,14 +117,14 @@ class PipelineWorker:
         claimed = self._claim()
         if claimed is None:
             return False
-        session_id, mode = claimed
-        await self._process(session_id, mode)
+        session_id, mode, user_id = claimed
+        await self._process(session_id, user_id, mode)
         return True
 
     # ---- 状态机：认领 / 推进 / 完成 / 失败退款（全部条件 UPDATE 守卫）。
     # ---- 每个单元一个 app.db.short_tx 短事务（与 get_session 同一协议） ----
 
-    def _claim(self) -> tuple[int, str] | None:
+    def _claim(self) -> tuple[int, str, int] | None:
         """认领最老的 queued 会话（queued → running + model_snapshot）。"""
         with short_tx(self._session_factory) as session:
             row = session.execute(
@@ -148,11 +155,34 @@ class PipelineWorker:
                 return None
         # 短事务已提交才通知进度流（app.stream）：唤醒后重读库，通知丢了也不丢状态
         stream.notify(row.id)
-        return (row.id, row.mode)
+        return (row.id, row.mode, row.user_id)
 
-    async def _process(self, session_id: int, mode: str) -> None:
+    def _custom_default_prompt(self, user_id: int, stage: str) -> str | None:
+        """该用户在该阶段启用的自定义默认提示词正文；无则 None（只读短事务）。
+
+        "同用户同阶段至多一个默认"的不变量由将来的提示词管理接口维护；读取
+        端按 updated_at/id 最新优先，脏数据（多条 default）下选取仍是确定的。
+        user_id 过滤天然排除 is_system 行（系统行 user_id 为 NULL）。
+        """
+        with short_tx(self._session_factory) as session:
+            return session.execute(
+                select(CustomPrompt.content)
+                .where(
+                    CustomPrompt.user_id == user_id,
+                    CustomPrompt.stage == stage,
+                    CustomPrompt.is_default.is_(True),
+                    CustomPrompt.is_active.is_(True),
+                )
+                .order_by(CustomPrompt.updated_at.desc(), CustomPrompt.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+    async def _process(self, session_id: int, user_id: int, mode: str) -> None:
         stages = optimization.stages_for_mode(mode)
         for stage in stages:
+            # 提示词每阶段解析一次（一次只读短事务，在首个 await 前提交关闭）：
+            # 用户自定义默认优先，无则回落系统级解析
+            system_prompt = self._custom_default_prompt(user_id, stage) or self._prompt_for(stage)
             for seq in self._segment_seqs(session_id, stage):
                 if not self._session_active(session_id):
                     return  # 会话被并发取消：停止烧 LLM，终态已归取消方
@@ -160,9 +190,7 @@ class PipelineWorker:
                 if source is None:
                     continue  # 已完成段落：断点续跑不重算（T5 恢复协议的落点）
                 try:
-                    result = await self._llm.polish(
-                        source, system_prompt=self._prompt_for(stage)
-                    )
+                    result = await self._llm.polish(source, system_prompt=system_prompt)
                 except LLMError as exc:
                     self._fail(session_id, exc, stage=stage, seq=seq)
                     return

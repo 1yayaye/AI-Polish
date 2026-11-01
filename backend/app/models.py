@@ -103,7 +103,9 @@ class CustomPrompt(Base):
     # 流水线阶段：'polish' / 'enhance'
     stage: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    # 同用户同阶段可有一个默认提示词（M2 接入流水线时消费）
+    # 同用户同阶段至多一个默认提示词；流水线每阶段的消费点在 app.worker
+    # （_custom_default_prompt）。该不变量由将来的提示词管理接口（M3）维护，
+    # 读取端按 updated_at/id 最新优先防御脏数据
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
