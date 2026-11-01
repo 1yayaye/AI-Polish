@@ -278,3 +278,37 @@ export function listSessions(params: {
 export function getAdminSessionDetail(sessionId: number): Promise<AdminSessionDetail> {
   return request(`/api/admin/sessions/${sessionId}`)
 }
+
+// ---- 系统配置只读面（issue #29）----
+
+/** 模型接入三项状态：接入点与模型名原值展示，API key 只有是否已配置。 */
+export interface ModelAccessStatus {
+  configured: boolean
+  base_url: string | null
+  model: string | null
+  api_key_configured: boolean
+}
+
+/** 敏感配置项状态：值绝不离开后端，只有"已配置/未配置"布尔。 */
+export interface SecretStatus {
+  configured: boolean
+}
+
+/** 系统配置只读快照：敏感项在结构上没有值字段，不存在泄露面。 */
+export interface AdminConfigView {
+  recovery_max_attempts: number
+  recovery_stuck_after_seconds: number
+  recovery_patrol_interval_seconds: number
+  max_session_text_chars: number
+  llm: ModelAccessStatus
+  admin_password: SecretStatus
+  jwt_secret: SecretStatus
+}
+
+/**
+ * 系统配置只读快照（ADR-0005：.env 是唯一配置来源，改配置 = 改 .env +
+ * 重启；后端不存在任何改配置的接口）。纯只读，无任何写路径。
+ */
+export function getAdminConfig(): Promise<AdminConfigView> {
+  return request('/api/admin/config')
+}

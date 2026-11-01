@@ -1,5 +1,5 @@
 """管理端（运营商后台）API：登录认证、卡密批量生成、用户列表、账本流水查询、
-会话监控（列表/详情，只读）。
+会话监控（列表/详情，只读）、系统配置只读面。
 
 认证模型：管理凭据只来自 .env（ADR-0005，改凭据 = 改文件 + 重启，不存在
 后台改密码的路径）。登录成功签发 HS256 JWT 存入 HttpOnly cookie，后续请求
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session
 
-from app import billing, optimization
+from app import billing, llm, optimization
 from app.billing import BillingError, InsufficientBalance
 from app.config import settings
 from app.db import get_session
@@ -617,4 +617,66 @@ def get_session_detail(
             )
             for e in ledger_rows
         ],
+    )
+
+
+# ---- 系统配置只读面（issue #29）----
+#
+# 运营商不登服务器就能确认服务配置。配置以 .env 为唯一来源（ADR-0005，
+# 改配置 = 改 .env + 重启），本接口是纯只读快照：后端不存在任何改配置的
+# 接口或表，页面能做的只有"看"。
+
+
+class ModelAccessStatus(BaseModel):
+    """模型接入三项状态。base_url 与模型名不是秘密，原值展示（排查"用的
+    哪个模型/哪个接入点"的入口）；api_key 绝不返回值，只给是否已配置。"""
+
+    configured: bool  # 三项齐备 = 润色 Worker 随应用启动（app.main.lifespan 同一判据）
+    base_url: str | None
+    model: str | None
+    api_key_configured: bool
+
+
+class SecretStatus(BaseModel):
+    """敏感配置项状态：值（密码/密钥）绝不离开服务进程，只给是否已配置的
+    布尔——页面截图/录屏/接口响应都不泄露凭据。"""
+
+    configured: bool
+
+
+class AdminConfigView(BaseModel):
+    """运行参数与模型接入状态的只读快照。敏感项在响应模型里只有布尔字段，
+    敏感值在结构上进不了任何响应（含 Swagger schema）——零泄露靠结构保证，
+    不靠"序列化前记得脱敏"。"""
+
+    recovery_max_attempts: int
+    recovery_stuck_after_seconds: int
+    recovery_patrol_interval_seconds: float
+    max_session_text_chars: int
+    llm: ModelAccessStatus
+    admin_password: SecretStatus
+    jwt_secret: SecretStatus
+
+
+@router.get("/config")
+def read_config(_admin: str = Depends(get_current_admin)) -> AdminConfigView:
+    """系统配置只读面（spec #15 用户故事 15-16）：运行参数 + 模型接入状态。
+
+    展示的运行参数与 config.Settings 字段同名同义（恢复协议参数、会话文本
+    上限）；模型接入三项的齐备判据与 app.llm.is_configured 同源。敏感项
+    （LLM key、管理密码、JWT 密钥）只返回是否已配置，绝不返回值。
+    """
+    return AdminConfigView(
+        recovery_max_attempts=settings.recovery_max_attempts,
+        recovery_stuck_after_seconds=settings.recovery_stuck_after_seconds,
+        recovery_patrol_interval_seconds=settings.recovery_patrol_interval_seconds,
+        max_session_text_chars=settings.max_session_text_chars,
+        llm=ModelAccessStatus(
+            configured=llm.is_configured(),
+            base_url=settings.llm_base_url or None,
+            model=settings.llm_model or None,
+            api_key_configured=bool(settings.llm_api_key),
+        ),
+        admin_password=SecretStatus(configured=bool(settings.admin_password)),
+        jwt_secret=SecretStatus(configured=bool(settings.jwt_secret)),
     )
