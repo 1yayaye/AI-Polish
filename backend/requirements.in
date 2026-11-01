@@ -1,0 +1,4 @@
+# 运行时依赖（直接依赖声明；锁定版本见 requirements.txt，勿手改）
+fastapi
+uvicorn
+pydantic-settings

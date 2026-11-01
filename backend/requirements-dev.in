@@ -1,0 +1,4 @@
+# 开发/测试依赖（含全部运行时依赖；锁定版本见 requirements-dev.txt，勿手改）
+-r requirements.in
+pytest
+httpx

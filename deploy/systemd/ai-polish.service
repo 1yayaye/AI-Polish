@@ -1,0 +1,29 @@
+# AI-Polish 后端服务（由 deploy.sh 安装到 /etc/systemd/system/）
+# 路径/用户若与默认不同，需同步修改本文件与 deploy.sh 中的安装逻辑。
+[Unit]
+Description=AI-Polish backend (FastAPI + uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=aipolish
+Group=aipolish
+WorkingDirectory=/opt/ai-polish/backend
+ExecStart=/opt/ai-polish/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+# 512MB 服务器上限制后端内存上限：OOM 时由 systemd 重启，而不是整机失控
+MemoryMax=256M
+
+# docx 等文件输出走私有 /tmp，与系统临时目录隔离（ADR-0002）
+PrivateTmp=true
+
+# 最小权限加固：只读系统、只写数据目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ai-polish/backend/data
+
+[Install]
+WantedBy=multi-user.target
