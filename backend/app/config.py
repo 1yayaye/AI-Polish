@@ -48,5 +48,10 @@ class Settings(BaseSettings):
     recovery_stuck_after_seconds: int = 2 * 60 * 60
     recovery_patrol_interval_seconds: float = 300.0
 
+    # 单次会话提交文本的字符数上限（len 口径，非计费字数）：资源护栏，
+    # 兼顾整篇论文场景（5 万字 ≈ 一篇硕士论文全文）；超限创建请求 422。
+    # 调大时须同步调大 deploy/nginx/ai-polish.conf 的 client_max_body_size
+    max_session_text_chars: int = 50_000
+
 
 settings = Settings()

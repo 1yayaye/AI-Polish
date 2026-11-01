@@ -31,6 +31,10 @@ cd /opt/ai-polish
 cp backend/.env.example backend/.env
 ```
 
+配置要点：
+
+- `MAX_SESSION_TEXT_CHARS`（默认 50000）：单次会话提交文本的字符数上限（len 口径，非计费字数），超限创建请求返回 422。直连 8000 时由应用层校验器兜底；Nginx 的 `client_max_body_size`（`deploy/nginx/ai-polish.conf` 的 443 块 `/api/` location）是第二道防线——两者需同步调整，只调大应用层时超限大文本会在 Nginx 层以 413 被拒。
+
 生产目录职责：
 
 | 路径 | 用途 |

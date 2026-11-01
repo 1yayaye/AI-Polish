@@ -22,12 +22,16 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app import billing, optimization  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.db import short_tx  # noqa: E402
 from test_billing import assert_ledger_reconciles  # noqa: E402
 
 # 10000 个非空白字符：恰好一个"万字"，polish 定价 300 分（见 _PRICE_FEN_PER_10K）
 FULL_TEN_THOUSAND = "字" * 10_000
 POLISH_TEN_K_FEN = 300
+
+# 默认文本上限（settings.max_session_text_chars）；发卡额度须覆盖满额预扣
+DEFAULT_TEXT_CAP = 50_000
 
 
 @pytest.fixture()
@@ -369,6 +373,72 @@ def test_cancel_other_users_session_is_invisible_and_unrefunded(
     assert _balance_fen(db_session_factory, stranger.id) == 5000
     assert _balance_fen(db_session_factory, owner.id) == 5000 - 1  # 预扣未退
     assert_ledger_reconciles(db_session_factory, owner.id)
+
+
+def test_create_session_over_text_cap_rejected_422_with_zero_side_effects(
+    client: TestClient, funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    user = funded_user(card_key="card-cap", balance_fen=5000)
+
+    response = client.post(
+        "/api/optimization/sessions",
+        json={"text": "字" * (DEFAULT_TEXT_CAP + 1), "mode": "paper_polish"},
+        headers={"X-Card-Key": user.card_key},
+    )
+
+    assert response.status_code == 422
+    # 零副作用：无会话行、无段落行、余额不变、账本零变动，SUM(账本)==余额
+    assert _session_rows(db_session_factory) == []
+    assert _balance_fen(db_session_factory, user.id) == 5000
+    session = db_session_factory()
+    try:
+        assert (
+            session.execute(
+                select(func.count(LedgerEntry.id)).where(LedgerEntry.user_id == user.id)
+            ).scalar_one()
+            == 1  # 仅发卡 issue 行
+        )
+    finally:
+        session.close()
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_create_session_text_exactly_at_cap_is_accepted(
+    client: TestClient, funded_user: Callable[..., User], db_session_factory: sessionmaker
+) -> None:
+    user = funded_user(card_key="card-cap-edge", balance_fen=5000)
+
+    response = client.post(
+        "/api/optimization/sessions",
+        json={"text": "字" * DEFAULT_TEXT_CAP, "mode": "paper_polish"},
+        headers={"X-Card-Key": user.card_key},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["word_count"] == DEFAULT_TEXT_CAP
+    assert body["charged_fen"] == 1500  # ceil(50000 × 300 / 10000)
+    assert_ledger_reconciles(db_session_factory, user.id)
+
+
+def test_text_cap_reads_settings_at_runtime(
+    client: TestClient,
+    funded_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上限唯一来源是 settings（.env + 重启）：运行时生效，可被 monkeypatch。"""
+    monkeypatch.setattr(settings, "max_session_text_chars", 100)
+    user = funded_user(card_key="card-cap-runtime", balance_fen=5000)
+
+    response = client.post(
+        "/api/optimization/sessions",
+        json={"text": "字" * 101, "mode": "paper_polish"},
+        headers={"X-Card-Key": user.card_key},
+    )
+
+    assert response.status_code == 422
+    assert _session_rows(db_session_factory) == []
 
 
 def test_cancel_refund_conflict_maps_409_and_rolls_back_to_cancellable(

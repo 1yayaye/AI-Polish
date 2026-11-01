@@ -19,12 +19,13 @@ import math
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from app import billing
 from app.auth import get_current_user
+from app.config import settings
 from app.db import get_session
 from app.models import OptimizationSession, Segment, SegmentChangeLog, User
 
@@ -298,6 +299,20 @@ class SessionSummaryOut(BaseModel):
 class CreateSessionRequest(BaseModel):
     text: str
     mode: Mode
+
+    @field_validator("text")
+    @classmethod
+    def _within_length_cap(cls, value: str) -> str:
+        """请求边界护栏：单次提交文本不超过 settings.max_session_text_chars。
+
+        运行时读取 settings（非 Field(max_length=) 的类定义期固化）：改配置
+        = 改 .env + 重启，测试可 monkeypatch。超限 ValidationError 由 FastAPI
+        映射 422。
+        """
+        limit = settings.max_session_text_chars
+        if len(value) > limit:
+            raise ValueError(f"文本长度 {len(value)} 超过上限 {limit} 字符")
+        return value
 
 
 def _to_summary(row: OptimizationSession) -> SessionSummaryOut:
