@@ -32,7 +32,19 @@ def test_login_success_sets_httponly_cookie(client: TestClient, admin_credential
     set_cookie = response.headers["set-cookie"]
     assert f"{COOKIE_NAME}=" in set_cookie
     assert "httponly" in set_cookie.lower()
+    assert "secure" in set_cookie.lower()  # 默认走 HTTPS，JWT 不允许明文传输
     assert client.cookies.get(COOKIE_NAME)
+
+
+def test_login_cookie_secure_flag_follows_settings(
+    client: TestClient, admin_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Secure 标志由 .env 配置（默认 true）；本地纯 HTTP 调试可显式关闭。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "admin_cookie_secure", False)
+    set_cookie = login(client, ADMIN_USERNAME, ADMIN_PASSWORD).headers["set-cookie"]
+    assert "secure" not in set_cookie.lower()
 
 
 def test_login_wrong_password_rejected(client: TestClient, admin_credentials: None) -> None:

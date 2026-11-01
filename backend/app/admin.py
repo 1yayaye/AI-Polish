@@ -89,6 +89,7 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
         _COOKIE_NAME,
         _create_token(body.username),
         httponly=True,
+        secure=settings.admin_cookie_secure,
         samesite="lax",
         max_age=_TOKEN_TTL_SECONDS,
     )

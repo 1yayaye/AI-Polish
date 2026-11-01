@@ -28,5 +28,10 @@ class Settings(BaseSettings):
     admin_password: str = ""
     jwt_secret: str = ""
 
+    # 管理端会话 cookie 的 Secure 标志：生产走 HTTPS 保持默认 true；
+    # 仅本地纯 HTTP 调试时改为 false（浏览器对 localhost 豁免 Secure 限制，
+    # TestClient 等非浏览器客户端不豁免）
+    admin_cookie_secure: bool = True
+
 
 settings = Settings()

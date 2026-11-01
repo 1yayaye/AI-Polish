@@ -63,9 +63,13 @@ def db_session_factory(db_engine: Engine) -> sessionmaker:
 def client(db_session_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """把 app.db.SessionLocal 换成测试库的 session 工厂：get_session 依赖保持
     原样（它每次调用都从 app.db 模块取 SessionLocal），提交/回滚协议与生产
-    同源，不会在测试里悄悄分叉。"""
+    同源，不会在测试里悄悄分叉。
+
+    base_url 用 https：生产会话 cookie 带 Secure 标志（默认），http 客户端
+    不回传 Secure cookie，登录后的请求会全部 401。
+    """
     monkeypatch.setattr(app_db, "SessionLocal", db_session_factory)
-    yield TestClient(app)
+    yield TestClient(app, base_url="https://testserver")
 
 
 @pytest.fixture()
