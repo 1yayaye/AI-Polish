@@ -34,6 +34,8 @@ pydantic-core==2.50.2
     # via pydantic
 pydantic-settings==2.16.2
     # via -r requirements.in
+pyjwt==2.15.1
+    # via -r requirements.in
 python-dotenv==1.2.4
     # via pydantic-settings
 sqlalchemy==2.1.6

@@ -21,11 +21,15 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.config import settings  # noqa: E402
 from app.db import create_db_engine, get_session  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import User  # noqa: E402
 
 ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin-pass-123"
 
 
 def _alembic_config(database_url: str) -> alembic.config.Config:
@@ -99,3 +103,11 @@ def make_user(db_session_factory: sessionmaker) -> Callable[..., User]:
             session.close()
 
     return _make
+
+
+@pytest.fixture()
+def admin_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """给 settings 注入测试用管理端凭据（生产从 .env 读取，ADR-0005）。"""
+    monkeypatch.setattr(settings, "admin_username", ADMIN_USERNAME)
+    monkeypatch.setattr(settings, "admin_password", ADMIN_PASSWORD)
+    monkeypatch.setattr(settings, "jwt_secret", "test-jwt-secret-0123456789abcdef0123456789abcdef")

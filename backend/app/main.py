@@ -6,6 +6,7 @@
 
 from fastapi import FastAPI
 
+from app.admin import router as admin_router
 from app.api import router
 
 app = FastAPI(
@@ -14,6 +15,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 app.include_router(router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

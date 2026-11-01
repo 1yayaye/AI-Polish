@@ -58,6 +58,8 @@ pydantic-settings==2.16.2
     # via -r requirements.in
 pygments==2.21.0
     # via pytest
+pyjwt==2.15.1
+    # via -r requirements.in
 pytest==9.2.0
     # via -r requirements-dev.in
 python-dotenv==1.2.4

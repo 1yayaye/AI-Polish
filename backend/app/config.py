@@ -22,5 +22,11 @@ class Settings(BaseSettings):
     # sqlite:/// 路径相对于 backend/ 工作目录；生产环境由部署文档固定为 data/app.db
     database_url: str = "sqlite:///data/app.db"
 
+    # 管理端登录凭据与 JWT 签名密钥（ADR-0005：与全部配置同源，改凭据 = 改 .env + 重启）。
+    # 三项任一为空即视为"管理端未配置"，登录一律拒绝。
+    admin_username: str = ""
+    admin_password: str = ""
+    jwt_secret: str = ""
+
 
 settings = Settings()
