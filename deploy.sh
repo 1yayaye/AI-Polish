@@ -19,10 +19,17 @@ for cmd in npm python3 systemctl nginx curl; do
   command -v "$cmd" >/dev/null || die "缺少命令：$cmd（安装步骤见 docs/deployment.md）"
 done
 
-# 依赖锁定版本按 Python 3.13 生成，其他小版本不保证兼容
-py3_minor=$(python3 -c 'import sys; print(sys.version_info[1])')
-[ "$(python3 -c 'import sys; print(sys.version_info[0])')" = "3" ] && [ "$py3_minor" = "13" ] \
-  || die "python3 须为 Python 3.13.x（当前 $(python3 -V 2>&1)）；安装方法见 docs/deployment.md §1"
+# 依赖锁定版本按 Python 3.13 生成。优先用 python3.13 解释器本身：
+# 不要把系统 python3 重指到 3.13——apt 的 python 钩子（apt_pkg 等）只为发行版
+# 自带版本编译，重指会让 apt 与其 post-invoke 脚本全线报错（彩排实测）。
+if command -v python3.13 >/dev/null; then
+  PY=python3.13
+else
+  PY=python3
+fi
+py3_minor=$("$PY" -c 'import sys; print(sys.version_info[1])')
+[ "$("$PY" -c 'import sys; print(sys.version_info[0])')" = "3" ] && [ "$py3_minor" = "13" ] \
+  || die "须有 Python 3.13.x（当前 $("$PY" -V 2>&1)）；安装方法见 docs/deployment.md §1"
 
 # 前端构建链（Vite 7）要求 Node 20.19+ / 22.12+，apt 自带的 18.x 只会得到警告
 node -p 'const [a,b]=process.versions.node.split(".").map(Number);(a>22)||(a===22&&b>=12)||(a===20&&b>=19)' >/dev/null 2>&1 \
@@ -36,7 +43,7 @@ cd "$REPO_DIR"
 
 log "安装后端依赖（backend/requirements.txt 为 pip-compile 锁定版本）..."
 if [ ! -x "$BACKEND_VENV/bin/python" ]; then
-  python3 -m venv "$BACKEND_VENV"
+  "$PY" -m venv "$BACKEND_VENV"
 fi
 "$BACKEND_VENV/bin/pip" install -q --upgrade pip
 "$BACKEND_VENV/bin/pip" install -q -r "$REPO_DIR/backend/requirements.txt"
