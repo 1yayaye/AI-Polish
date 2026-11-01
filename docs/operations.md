@@ -61,3 +61,19 @@ sudo systemctl daemon-reload && sudo systemctl start ai-polish
 - 服务器 IP / 密码 / 管理凭据不写入本仓库与本机 shell 历史
 - 内存 426MB + 1G swap（`/swapfile`，已入 fstab）：构建期可能短暂吃 swap，属预期
 - 业务监控以**账本对账**为准：`SUM(账本) == 每用户余额`；巡检对滞留 queued 只告警不退款（日志可见即需人工排查）
+
+## 验收/排障日志查证（T7 速查）
+
+日志四层，各管一段：**journald**（应用与请求生命周期，持久化于 /var/log/journal，重启不丢）、**nginx access/error**（`/var/log/nginx/`，含 Cloudflare 边缘 IP 的访问）、**SQLite 账本**（资金权威证据）、**model_snapshot 列**（客诉时查当时模型）。卡密只走请求头，任何日志里都不出现。
+
+| T7 步骤 | 查证命令 | 应看到 |
+|---|---|---|
+| Worker 是否启动 | `journalctl -u ai-polish \| grep -iE "worker\|startup"` | LLM 三项配置后 startup 且 Worker 拉取日志；缺配置时只有"流水线未配置"类日志 |
+| 提交与预扣费 | `journalctl -u ai-polish \| grep "POST /api/optimization/sessions"` | 201；配合账本 charge 行 |
+| LLM 重试/失败 | `journalctl -u ai-polish -p warning..alert` | 瞬时错误退避重试 warning；内容性失败后任务 failed + refund |
+| kill -9 演练 | `kill -9 $(systemctl show -p MainPID --value ai-polish)` 后 `journalctl -u ai-polish` | `Main process exited, code=killed, status=9/KILL` → systemd 重启 → 启动恢复日志（断点续跑/兜底退款） |
+| SSE 连接 | nginx `access.log` + `journalctl` | 200 流式响应；卡密不在任何日志 |
+| 资金权威证据 | `sudo -u aipolish sqlite3 backend/data/app.db "SELECT u.id,u.balance_fen,COALESCE(SUM(l.amount_fen),0) FROM users u LEFT JOIN ledger_entries l ON l.user_id=u.id GROUP BY u.id;"` | 每用户 `balance == SUM(账本)` |
+| 客诉查模型 | `... SELECT id,model_snapshot,status FROM optimization_sessions WHERE id=?` | 当时所用模型只读快照 |
+
+> sqlite3 CLI 未装时用 `sudo -u aipolish backend/.venv/bin/python -c "..."` 等价查询。
