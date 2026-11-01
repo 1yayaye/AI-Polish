@@ -7,6 +7,7 @@ pytest 只会把 backend/tests 加进 sys.path；这里补上 backend/ 使 `impo
 提交/回滚协议始终只有 get_session 一份（生产同款），测试不复制事务边界。
 """
 
+import asyncio
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.config import settings  # noqa: E402
 from app.db import create_db_engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import User  # noqa: E402
+import app.main as app_main  # noqa: E402
 
 ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
 
@@ -59,6 +61,19 @@ def db_session_factory(db_engine: Engine) -> sessionmaker:
     return sessionmaker(bind=db_engine, autoflush=False, expire_on_commit=False)
 
 
+class _ParkedWordJobWorker:
+    """lifespan 里 WordJobWorker 的驻留替身：格式化任务的推进由各测试显式
+    单步驱动（Worker 单步推进是 spec #31 规定的测试接缝），常驻轮询协程
+    与测试驱动同一测试库会互相抢任务，这里以"构造即挂起"替代。lifespan
+    对它的启动/关停行为本身由 test_word_jobs 的装配测试守护。"""
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    async def run_forever(self) -> None:
+        await asyncio.Event().wait()
+
+
 @pytest.fixture()
 def client(db_session_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """把 app.db.SessionLocal 换成测试库的 session 工厂：get_session 依赖保持
@@ -69,6 +84,7 @@ def client(db_session_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) ->
     不回传 Secure cookie，登录后的请求会全部 401。
     """
     monkeypatch.setattr(app_db, "SessionLocal", db_session_factory)
+    monkeypatch.setattr(app_main, "WordJobWorker", _ParkedWordJobWorker)
     yield TestClient(app, base_url="https://testserver")
 
 

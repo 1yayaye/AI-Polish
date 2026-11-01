@@ -53,5 +53,13 @@ class Settings(BaseSettings):
     # 调大时须同步调大 deploy/nginx/ai-polish.conf 的 client_max_body_size
     max_session_text_chars: int = 50_000
 
+    # Word Formatter（M4）：单次格式化/预处理提交的文本字符数上限（独立于
+    # 会话的 5 万上限——排版对象是整篇文档）；超限创建请求 422。
+    max_word_text_chars: int = 200_000
+
+    # docx 产物落盘目录（相对 backend 工作目录，同 DATABASE_URL 路径约定）：
+    # 任务产物按任务 id 命名写入该目录，DB 只存文件名（spec #31 落盘纪律）
+    word_output_dir: str = "data/word_jobs"
+
 
 settings = Settings()

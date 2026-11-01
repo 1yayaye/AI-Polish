@@ -11,7 +11,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -221,6 +221,54 @@ class SegmentChangeLog(Base):
 
     __table_args__ = (
         Index("ux_segment_change_logs_session_stage_seq", "session_id", "stage", "seq", unique=True),
+    )
+
+
+class FormatJob(Base):
+    """Word Formatter 任务（GLOSSARY：格式化任务）：格式化/预处理各一次提交一行。
+
+    状态机（唯一事实源，ADR-0003）：queued → running → completed/failed；
+    不设 cancelled（旧版取消从未有路由暴露）。全部状态迁移由任务模块
+    （app.word_jobs）与任务 Worker（app.word_worker）拥有，其他模块只读。
+
+    计费字段：创建即经计费服务 reserve_usage（task_id=本任务 id，账本
+    usage_reserve 行）；失败路径由任务模块统一 release_usage。行内不存任何
+    金额——次数轨变动只看账本。
+
+    产物列（M4 落盘纪律，spec #31）：docx 写数据目录（settings.word_output_dir
+    下按任务 id 命名），DB 只存文件名；下载时由 app.word_jobs 解析出完整路径
+    （数据目录迁移不改库）。output_filename 是交付文件名（保留原文件名加后缀）。
+
+    进度三列（phase/progress/message）由 Worker 在短事务内推进，是进度流
+    （issue #34）的现读现推事实源；任务整体无内部断点，进度只是展示态。
+    """
+
+    __tablename__ = "format_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    # format（排版编译）/ preprocess（AI 分块标记，M4-T4 接入）
+    job_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # queued / running / completed / failed
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True, nullable=False)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False)
+    input_file_name: Mapped[str | None] = mapped_column(String(255))
+    # 编译/预处理配置 JSON（input_format/spec_name/custom_spec/include_cover 等），
+    # 结构由消费方（app.word_worker / M4-T4 预处理）拥有，本表只存取不解释
+    options: Mapped[dict | None] = mapped_column(JSON)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 进度三列：阶段名、0.0-1.0 进度、人读消息
+    phase: Mapped[str | None] = mapped_column(String(32))
+    progress: Mapped[float | None] = mapped_column(Float)
+    message: Mapped[str | None] = mapped_column(String(255))
+    output_path: Mapped[str | None] = mapped_column(String(255))
+    output_filename: Mapped[str | None] = mapped_column(String(255))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )
 
 
