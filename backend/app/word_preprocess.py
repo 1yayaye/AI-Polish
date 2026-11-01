@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Protocol
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -161,8 +161,9 @@ async def execute_preprocess_job(
 
 
 def result_path(job_id: int) -> Path:
-    """预处理结果产物路径（word_output_dir 下按任务 id 命名的 JSON）。"""
-    return word_jobs.artifact_path(f"{job_id}.json")
+    """预处理结果产物路径（word_output_dir 下按任务 id 命名的 JSON，命名纪律
+    归 app.word_jobs.result_filename——删除/保留期清理用同一词汇）。"""
+    return word_jobs.artifact_path(word_jobs.result_filename(job_id))
 
 
 def write_result_artifact(job_id: int, result: PreprocessResult) -> None:
@@ -226,17 +227,13 @@ def _preprocess_options(chunk_paragraphs: int, chunk_chars: int) -> dict:
 
 
 class PreprocessTextRequest(BaseModel):
-    """粘贴文本预处理请求：文本护栏与格式化共用（word_jobs.validated_text），
-    分块参数决定 AI 标记的分块粒度。"""
+    """粘贴文本预处理请求：分块参数决定 AI 标记的分块粒度。text 的体量护栏
+    在路由内经 word_jobs.validated_text 映射（422/413），不走 pydantic
+    校验器——校验器只能产出 422。"""
 
     text: str
     chunk_paragraphs: int = Field(40)
     chunk_chars: int = Field(8000)
-
-    @field_validator("text")
-    @classmethod
-    def _validate_text(cls, value: str) -> str:
-        return word_jobs.validated_text(value)
 
 
 class PreprocessParagraphOut(BaseModel):
@@ -293,13 +290,19 @@ def create_preprocess_text_job(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> FormatJob:
-    """粘贴文本创建预处理任务：模型未配置 503（零副作用）→ 文本/分块参数
-    校验 422 → 预留次数 403 → queued。"""
+    """粘贴文本创建预处理任务：模型未配置 503（零副作用）→ 体量护栏
+    （422/413）→ 分块参数校验 422 → 预留次数 403 → queued。"""
     _require_model_configured()
+    try:
+        text = word_jobs.validated_text(request.text)
+    except word_jobs.PayloadTooLarge as exc:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return _create_preprocess_job(
         session,
         user,
-        text=request.text,
+        text=text,
         chunk_paragraphs=request.chunk_paragraphs,
         chunk_chars=request.chunk_chars,
     )
@@ -313,17 +316,18 @@ async def create_preprocess_file_job(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> FormatJob:
-    """上传文件创建预处理任务：解码/提文本与格式化上传共用同一护栏
-    （word_jobs.extract_upload_text，422），其余同粘贴路径。"""
+    """上传文件创建预处理任务：解码/提文本与文件字节上限与格式化上传共用
+    同一护栏（word_jobs.extract_upload_text，422/413），其余同粘贴路径。"""
     _require_model_configured()
     file_name = file.filename or ""
     content = await file.read()
     try:
         text, _ = word_jobs.extract_upload_text(file_name, content)
+        text = word_jobs.validated_text(text)
+    except word_jobs.PayloadTooLarge as exc:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
     except word_jobs.UploadFormatError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    try:
-        text = word_jobs.validated_text(text)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return _create_preprocess_job(

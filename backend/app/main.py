@@ -54,10 +54,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Word Formatter 任务地基（spec #31/#35）：Worker 无条件挂载（格式化任务
     # 不依赖模型接入；预处理的依赖在创建入口 503 拦截、Worker 内惰性解析）
     # ——与润色流水线"未配置即整体不启动"不同，这里没有整体可缺项的依赖。
+    # 保留期清理巡检协程随行（M4-T7）：过期终态任务连库行与落盘产物一并删除。
     app_word_jobs.recover_interrupted(app_db.SessionLocal)
     background_tasks.append(
         asyncio.create_task(
             WordJobWorker(app_db.SessionLocal).run_forever(), name="word-job-worker"
+        )
+    )
+    background_tasks.append(
+        asyncio.create_task(
+            app_word_jobs.purge_forever(app_db.SessionLocal), name="word-job-purge"
         )
     )
     # 方案 A（issue #23/#30）：库内 is_system 行是系统提示词唯一事实源，空库

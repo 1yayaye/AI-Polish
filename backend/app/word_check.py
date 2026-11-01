@@ -9,7 +9,8 @@
   字典说明与检查结果术语的唯一数据源，词汇不在此复制第二份）。
 - **检查（HTTP）**：POST /format-check/text（粘贴）与 /format-check/file
   （上传）。输入护栏与格式化/预处理共用同一份（word_jobs.validated_text 与
-  extract_upload_text，422 挡在检查之前）；mode 越出两档由 pydantic 422。
+  extract_upload_text，空文本/解码失败 422、体量超限 413，挡在检查之前）；
+  mode 越出两档由 pydantic 422。
 
 卡密只经 X-Card-Key header（app.auth），与其他 word-formatter 端点同约定。
 """
@@ -17,7 +18,7 @@
 from enum import Enum
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import word_jobs
@@ -65,18 +66,11 @@ class FormatCheckOut(BaseModel):
 
 
 class CheckTextRequest(BaseModel):
-    """粘贴检查请求：文本护栏与格式化共用（word_jobs.validated_text）。"""
+    """粘贴检查请求：text 的体量护栏在路由内经 word_jobs.validated_text 映射
+    （422/413），不走 pydantic 校验器——校验器只能产出 422。"""
 
     text: str
     mode: CheckModeName = Field(CheckModeName.loose)
-
-    @field_validator("text")
-    @classmethod
-    def _validate_text(cls, value: str) -> str:
-        try:
-            return word_jobs.validated_text(value)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
 
 
 @router.get("/format-check/types")
@@ -98,8 +92,14 @@ def check_format_text(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> FormatCheckOut:
-    """粘贴检查：文本校验（422）→ 同步规则检查。零任务行、零账本行（免费）。"""
-    return _run_check(request.text, request.mode)
+    """粘贴检查：体量护栏（422/413）→ 同步规则检查。零任务行、零账本行（免费）。"""
+    try:
+        text = word_jobs.validated_text(request.text)
+    except word_jobs.PayloadTooLarge as exc:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return _run_check(text, request.mode)
 
 
 @router.post("/format-check/file", response_model=FormatCheckOut)
@@ -109,15 +109,17 @@ async def check_format_file(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> FormatCheckOut:
-    """上传检查：解码/提文本与格式化上传共用同一护栏（422），其余同粘贴路径。"""
+    """上传检查：解码/提文本与文件字节上限与格式化上传共用同一护栏
+    （422/413），其余同粘贴路径。"""
     file_name = file.filename or ""
     content = await file.read()
     try:
         text, _ = word_jobs.extract_upload_text(file_name, content)
+        text = word_jobs.validated_text(text)
+    except word_jobs.PayloadTooLarge as exc:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
     except word_jobs.UploadFormatError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    try:
-        text = word_jobs.validated_text(text)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return _run_check(text, mode)

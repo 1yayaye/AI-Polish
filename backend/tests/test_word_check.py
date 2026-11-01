@@ -230,9 +230,9 @@ def test_check_input_guards(
     user = usage_user()
     headers = _headers(user)
 
-    # 空文本 / 超上限 / 非法档位：422
+    # 空文本 / 非法档位：422；超上限：413（M4-T7，与 Nginx 第二道防线同码）
     assert _check_text(client, user, "   \n ").status_code == 422
-    assert _check_text(client, user, "字" * 101).status_code == 422
+    assert _check_text(client, user, "字" * 101).status_code == 413
     assert (
         client.post(
             "/api/word-formatter/format-check/text",

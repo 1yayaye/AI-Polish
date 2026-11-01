@@ -13,9 +13,11 @@
 
 import asyncio
 import io
+import json
 import logging
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -26,6 +28,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import sessionmaker
 
 import app.main as app_main
+import app.word_preprocess as word_preprocess
 from app import billing, word_jobs
 from app.config import settings
 from app.db import short_tx
@@ -123,6 +126,20 @@ def _force_status(
         if attempt_count is not None:
             values["attempt_count"] = attempt_count
         session.execute(update(FormatJob).where(FormatJob.id == job_id).values(**values))
+        session.commit()
+    finally:
+        session.close()
+
+
+def _force_updated_at(
+    db_session_factory: sessionmaker, job_id: int, updated_at: datetime
+) -> None:
+    """把任务的 updated_at 拨到指定时刻（保留期测试的"终态早已落定"等价物）。"""
+    session = db_session_factory()
+    try:
+        session.execute(
+            update(FormatJob).where(FormatJob.id == job_id).values(updated_at=updated_at)
+        )
         session.commit()
     finally:
         session.close()
@@ -294,6 +311,7 @@ def test_create_rejects_blank_and_oversized_text(
     usage_user: Callable[..., User],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """空文本 422；超上限文本 413（M4-T7：与 Nginx 第二道防线同一状态码）。"""
     user = usage_user()
     headers = {"X-Card-Key": user.card_key}
     assert (
@@ -307,8 +325,30 @@ def test_create_rejects_blank_and_oversized_text(
         client.post(
             "/api/word-formatter/format/text", json={"text": "这一段正文的长度超过了十个字的上限"}, headers=headers
         ).status_code
-        == 422
+        == 413
     )
+
+
+def test_file_upload_rejects_oversized_file(
+    client: TestClient,
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传文件字节超上限 413，挡在解码/提文本之前，零副作用（M4-T7）。"""
+    monkeypatch.setattr(settings, "max_word_upload_mb", 1)
+    user = usage_user()
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("大文件.txt", b"x" * (1024 * 1024 + 1), "text/plain")},
+        headers={"X-Card-Key": user.card_key},
+    )
+    assert response.status_code == 413
+    session = db_session_factory()
+    try:
+        assert session.execute(select(func.count(FormatJob.id))).scalar_one() == 0
+    finally:
+        session.close()
 
 
 # ---- 任务查询 / 列表 / 删除 ----
@@ -381,6 +421,33 @@ def test_delete_completed_job_removes_row_and_file(
     assert client.delete(f"/api/word-formatter/jobs/{job_id}", headers=headers).status_code == 204
     assert client.get(f"/api/word-formatter/jobs/{job_id}", headers=headers).status_code == 404
     assert not artifact.exists()  # 连落盘产物一并清理
+
+
+def test_delete_preprocess_job_removes_result_json(
+    client: TestClient,
+    usage_user: Callable[..., User],
+    word_output_dir: Path,
+    db_session_factory: sessionmaker,
+) -> None:
+    """预处理任务的产物是结果 JSON（无 docx）：删除同样不留痕迹（M4-T7，
+    清理共用 job_artifacts，不允许只删其一留下残留）。"""
+    import app.word_preprocess as word_preprocess
+
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+    with short_tx(db_session_factory) as session:
+        job = word_jobs.create_format_job(
+            session, user, job_type=word_jobs.JOB_PREPROCESS, text="正文。", options=None
+        )
+        job_id = job.id
+    _force_status(db_session_factory, job_id, word_jobs.JOB_COMPLETED)
+    result = word_preprocess.result_path(job_id)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(json.dumps({"marked_text": "正文。"}), encoding="utf-8")
+
+    assert client.delete(f"/api/word-formatter/jobs/{job_id}", headers=headers).status_code == 204
+    assert _job_row(db_session_factory, job_id) is None
+    assert not result.exists()
 
 
 def test_delete_guards(
@@ -582,7 +649,103 @@ def test_recovery_ignores_queued_and_terminal_jobs(
     assert row.status == "queued" and row.attempt_count == 0  # 不碰、不计数
 
 
-# ---- lifespan 装配：启动恢复先于 Worker，Worker 随 lifespan 生死 ----
+# ---- 保留期清理：过期终态任务连库行与产物一并删除（M4-T7） ----
+
+
+def test_purge_expired_jobs_removes_only_expired_terminal_jobs(
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+    word_output_dir: Path,
+) -> None:
+    user = usage_user()
+    stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=25)
+
+    completed_id = _create_job(db_session_factory, user)
+    assert asyncio.run(WordJobWorker(db_session_factory, compiler=ScriptedCompiler(_ok_result())).process_next()) is True
+    docx = word_jobs.artifact_path(f"{completed_id}.docx")
+    assert docx.is_file()
+    _force_updated_at(db_session_factory, completed_id, stale)
+
+    # 过期 failed 预处理任务：产物是结果 JSON 而非 docx（清理不得漏掉这一种）
+    with short_tx(db_session_factory) as session:
+        job = word_jobs.create_format_job(
+            session, user, job_type=word_jobs.JOB_PREPROCESS, text="正文。", options=None
+        )
+        failed_id = job.id
+    _force_status(db_session_factory, failed_id, word_jobs.JOB_FAILED)
+    result = word_preprocess.result_path(failed_id)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_text(json.dumps({"marked_text": ""}), encoding="utf-8")
+    _force_updated_at(db_session_factory, failed_id, stale)
+
+    fresh_id = _create_job(db_session_factory, user)
+    assert asyncio.run(WordJobWorker(db_session_factory, compiler=ScriptedCompiler(_ok_result())).process_next()) is True
+    fresh_docx = word_jobs.artifact_path(f"{fresh_id}.docx")
+    assert fresh_docx.is_file()
+
+    queued_id = _create_job(db_session_factory, user)
+    _force_updated_at(db_session_factory, queued_id, stale)
+
+    assert word_jobs.purge_expired_jobs(db_session_factory, retention_seconds=3600) == 2
+
+    assert _job_row(db_session_factory, completed_id) is None
+    assert _job_row(db_session_factory, failed_id) is None
+    assert not docx.exists() and not result.exists()  # 库行与产物一并消失
+    assert _job_row(db_session_factory, fresh_id).status == "completed"  # 未过期不碰
+    assert fresh_docx.exists()
+    assert _job_row(db_session_factory, queued_id).status == "queued"  # 排队中不碰
+
+
+def test_purge_forever_reaps_expired_job_and_stays_cancellable(
+    usage_user: Callable[..., User], db_session_factory: sessionmaker, word_output_dir: Path
+) -> None:
+    user = usage_user()
+    job_id = _create_job(db_session_factory, user, status=word_jobs.JOB_FAILED)
+    _force_updated_at(db_session_factory, job_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=25))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            word_jobs.purge_forever(db_session_factory, interval_seconds=0.01, retention_seconds=3600)
+        )
+        for _ in range(500):
+            if _job_row(db_session_factory, job_id) is None:
+                break
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert _job_row(db_session_factory, job_id) is None  # 巡检协程清掉了过期任务
+
+
+def test_purge_forever_survives_round_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """清理协程不死：单轮异常记日志后下一轮继续（与润色巡检同一纪律）。"""
+
+    def boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("注入：清理数据库故障")
+
+    monkeypatch.setattr(word_jobs, "purge_expired_jobs", boom)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            word_jobs.purge_forever(None, interval_seconds=0.01)  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.1)
+        assert not task.done()  # 多轮异常后仍然存活
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level(logging.ERROR, logger="app.word_jobs"):
+        asyncio.run(scenario())
+
+    assert "保留期清理轮次失败" in caplog.text  # 响亮不吞
+
+
+# ---- lifespan 装配：启动恢复先于 Worker，Worker 与清理巡检随 lifespan 生死 ----
 
 
 def test_lifespan_recovers_word_jobs_and_starts_worker(
@@ -605,12 +768,21 @@ def test_lifespan_recovers_word_jobs_and_starts_worker(
 
     monkeypatch.setattr(app_main, "WordJobWorker", RecordingWorker)
 
+    purge_mounted: list[bool] = []
+
+    async def parked_purge(_factory: object, **_kwargs: object) -> None:
+        purge_mounted.append(True)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(word_jobs, "purge_forever", parked_purge)
+
     with client:
         pass
 
     row = _job_row(db_session_factory, job_id)
     assert row.status == "queued" and row.attempt_count == 1  # 启动恢复已执行
     assert len(constructed) == 1  # 任务 Worker 已挂载
+    assert purge_mounted == [True]  # 保留期清理巡检已挂载
 
 
 # ---- POST /format/file：上传解码（UTF-8/GBK 回落）与 docx 提文本（issue #34） ----

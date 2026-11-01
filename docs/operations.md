@@ -44,6 +44,9 @@ sudo nginx -t && sudo systemctl reload nginx
 | `ADMIN_USERNAME / ADMIN_PASSWORD` | 管理后台登录（部署时随机生成，`sudo cat` 查看） |
 | `JWT_SECRET` | 管理端会话签名密钥 |
 | `MAX_SESSION_TEXT_CHARS` | 单次提交文本上限（默认 50000，Nginx `client_max_body_size` 需同步） |
+| `MAX_WORD_TEXT_CHARS` | Word 排版/预处理提交文本上限（默认 200000，超限 413） |
+| `MAX_WORD_UPLOAD_MB` | Word 上传文件上限 MB（默认 20，超限 413；Nginx `client_max_body_size` 需同步，默认 21m） |
+| `WORD_JOB_RETENTION_SECONDS` / `WORD_JOB_PURGE_INTERVAL_SECONDS` | Word 任务保留期（默认 24h）与清理巡检间隔；过期终态任务连库行与产物一并删除 |
 | `RECOVERY_*` | 僵尸恢复：最大续跑次数 / 滞留阈值 / 巡检间隔 |
 
 ## 回滚（切回旧版）

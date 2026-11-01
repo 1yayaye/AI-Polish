@@ -34,6 +34,9 @@ cp backend/.env.example backend/.env
 配置要点：
 
 - `MAX_SESSION_TEXT_CHARS`（默认 50000）：单次会话提交文本的字符数上限（len 口径，非计费字数），超限创建请求返回 422。直连 8000 时由应用层校验器兜底；Nginx 的 `client_max_body_size`（`deploy/nginx/ai-polish.conf` 的 443 块 `/api/` location）是第二道防线——两者需同步调整，只调大应用层时超限大文本会在 Nginx 层以 413 被拒。
+- `MAX_WORD_TEXT_CHARS`（默认 200000）：Word Formatter 单次格式化/预处理提交的文本字符数上限（独立于会话的 5 万上限——排版对象是整篇文档），超限请求返回 413。
+- `MAX_WORD_UPLOAD_MB`（默认 20）：Word Formatter 上传文件字节上限（MB），超限请求返回 413。**Nginx 同步**：`client_max_body_size` 必须不小于该值加 multipart 封装余量（默认配置即 21m，见两份 `deploy/nginx/*.conf`）——调大 `.env` 上限而只调应用层时，超限上传会在 Nginx 层以 413 被拒，行为一致但与运营预期可能不符，两处一起改。
+- `WORD_JOB_RETENTION_SECONDS`（默认 86400）与 `WORD_JOB_PURGE_INTERVAL_SECONDS`（默认 300）：completed/failed Word 任务的保留期与清理巡检间隔；过期任务由巡检协程连库行与落盘产物一并删除，queued/running 不受影响。磁盘容量即该保留期内的任务产物总量。
 
 生产目录职责：
 

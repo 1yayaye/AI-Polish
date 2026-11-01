@@ -54,12 +54,22 @@ class Settings(BaseSettings):
     max_session_text_chars: int = 50_000
 
     # Word Formatter（M4）：单次格式化/预处理提交的文本字符数上限（独立于
-    # 会话的 5 万上限——排版对象是整篇文档）；超限创建请求 422。
+    # 会话的 5 万上限——排版对象是整篇文档）；超限创建请求 413。
     max_word_text_chars: int = 200_000
+
+    # 上传文件字节数上限（MB）：上传排版输入的体量护栏；超限上传请求 413。
+    # 调大时须同步调大 deploy/nginx 两份站点配置的 client_max_body_size
+    max_word_upload_mb: int = 20
 
     # docx 产物落盘目录（相对 backend 工作目录，同 DATABASE_URL 路径约定）：
     # 任务产物按任务 id 命名写入该目录，DB 只存文件名（spec #31 落盘纪律）
     word_output_dir: str = "data/word_jobs"
+
+    # 保留期清理（spec #31 用户故事 31）：completed/failed 任务超过保留期由
+    # 巡检协程连库行与落盘产物一并清理（queued/running 不碰）；
+    # word_job_purge_interval_seconds 是清理巡检轮询间隔
+    word_job_retention_seconds: int = 24 * 60 * 60
+    word_job_purge_interval_seconds: float = 300.0
 
 
 settings = Settings()

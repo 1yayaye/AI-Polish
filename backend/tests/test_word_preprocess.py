@@ -185,6 +185,7 @@ def test_create_validates_text_and_chunk_params(
     client: TestClient,
     usage_user: Callable[..., User],
     configured_llm: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = usage_user()
     headers = {"X-Card-Key": user.card_key}
@@ -209,6 +210,17 @@ def test_create_validates_text_and_chunk_params(
             "/api/word-formatter/preprocess/text", json=payload, headers=headers
         )
         assert response.status_code == 422, payload
+
+    # 超上限文本 413（M4-T7）：放最后——低上限对本测试其余断言是噪声
+    monkeypatch.setattr(settings, "max_word_text_chars", 10)
+    assert (
+        client.post(
+            "/api/word-formatter/preprocess/text",
+            json={"text": "这一段正文的长度超过了十个字的上限"},
+            headers=headers,
+        ).status_code
+        == 413
+    )
 
 
 def test_file_upload_routes_and_guards(
