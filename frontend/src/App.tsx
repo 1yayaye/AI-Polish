@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import UserShell from './UserShell'
 import WordFormatterPage from './word/WordFormatterPage'
 import ArticlePreprocessorPage from './word/ArticlePreprocessorPage'
+import SpecGeneratorPage from './word/SpecGeneratorPage'
 import Workspace from './Workspace'
 import { ApiError, getQuota, type Quota } from './api'
 
@@ -119,8 +120,11 @@ export default function App() {
             path="word"
             element={<WordFormatterPage cardKey={userKey} refreshQuota={refreshQuota} />}
           />
-          {/* 规格生成 / 格式检查两页由 #36/#37 各自替换占位 */}
-          <Route path="word/specs" element={<PlaceholderPage title="排版规格生成" />} />
+          {/* 格式检查页由 #37 替换占位 */}
+          <Route
+            path="word/specs"
+            element={<SpecGeneratorPage cardKey={userKey} refreshQuota={refreshQuota} />}
+          />
           <Route
             path="word/preprocess"
             element={<ArticlePreprocessorPage cardKey={userKey} refreshQuota={refreshQuota} />}

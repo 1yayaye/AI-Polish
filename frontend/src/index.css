@@ -403,3 +403,42 @@ button:disabled {
   align-items: baseline;
   flex-wrap: wrap;
 }
+
+/* 排版规格页（issue #36）：已存规格表与规格预览（三视图共用容器） */
+.spec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.spec-table th,
+.spec-table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+.spec-table th {
+  color: #6b7280;
+  font-weight: normal;
+}
+
+.spec-preview {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.spec-preview pre {
+  margin: 0;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.spec-json-editor {
+  font-family: monospace;
+}

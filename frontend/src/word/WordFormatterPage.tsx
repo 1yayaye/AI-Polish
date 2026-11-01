@@ -17,13 +17,16 @@ import { useJobStream } from '../useJobStream'
 
 /**
  * Word 排版页（issue #34，旧版 WordFormatter 页的 TS 迁移）：
- * 粘贴文本或上传 txt/md/docx（解码与 docx 提文本都在服务端）→ 选内置规格与
- * 封面/目录开关 → 提交排版任务 → SSE 实时进度 → blob 下载（header 认证）；
- * 任务列表可删除终态任务、找回进行中任务。剩余次数在外壳头部展示，创建
- * 预扣与失败退次后经 refreshQuota 刷新，与账本保持一致。
+ * 粘贴文本或上传 txt/md/docx（解码与 docx 提文本都在服务端）→ 选内置规格或
+ * 用规格生成页送来的一次性自定义规格与封面/目录开关 → 提交排版任务 → SSE
+ * 实时进度 → blob 下载（header 认证）；任务列表可删除终态任务、找回进行中
+ * 任务。剩余次数在外壳头部展示，创建预扣与失败退次后经 refreshQuota 刷新，
+ * 与账本保持一致。
  *
- * 文章预处理页（issue #35）经路由 state 送来的标记文本直接进文本框，并按
- * marked 输入提交（保留 wf:type 结构标记，衔接与旧版一致）。
+ * 页面衔接（issue #35/#36 经路由 state 送入）：预处理页送来的标记文本直接
+ * 进文本框并按 marked 输入提交（保留 wf:type 结构标记）；规格生成页送来的
+ * 规格 JSON 作为一次性 custom_spec 提交（服务端先校验，坏规格 422 挡在
+ * 预留之前），生效期间内置规格选择不参与。
  */
 
 const ACCEPT = '.txt,.md,.docx'
@@ -39,6 +42,17 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
   // 送来的标记文本必须按 marked 输入渲染（保留 wf:type 标记）；本次挂载内
   // 不变，无需状态。
   const inputFormat: 'auto' | 'marked' = preprocessedText ? 'marked' : 'auto'
+  // 规格生成页送来的一次性规格 JSON（全文）：解析失败按未送入处理（手改
+  // 路由态等异常输入不崩页面），提交时由服务端再做完整校验。
+  const sentSpecJson: string | null = location.state?.customSpecJson ?? null
+  const [customSpec, setCustomSpec] = useState<Record<string, unknown> | null>(() => {
+    if (sentSpecJson === null) return null
+    try {
+      return JSON.parse(sentSpecJson) as Record<string, unknown>
+    } catch {
+      return null
+    }
+  })
   const [text, setText] = useState(preprocessedText ?? '')
   const [file, setFile] = useState<File | null>(null)
   const [specs, setSpecs] = useState<string[]>([])
@@ -98,7 +112,8 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
     try {
       const created = await createFormatTextJob(cardKey, text, {
         input_format: inputFormat,
-        spec_name: specName || undefined,
+        spec_name: customSpec ? undefined : specName || undefined,
+        custom_spec: customSpec ?? undefined,
         include_cover: includeCover,
         include_toc: includeToc,
       })
@@ -166,11 +181,24 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
         {preprocessedText && (
           <p className="hint">已加载预处理文本（{preprocessedText.length} 字符），排版时将保留结构标记。</p>
         )}
+        {customSpec && (
+          <p className="meta">
+            已加载一次性自定义规格（来自规格生成页），粘贴文本提交时优先使用它，
+            内置规格选择不生效。{' '}
+            <button type="button" className="link-button" onClick={() => setCustomSpec(null)}>
+              改用内置规格
+            </button>
+          </p>
+        )}
         <form onSubmit={handleTextSubmit}>
           <div className="option-row">
             <label>
               排版规格{' '}
-              <select value={specName} onChange={(e) => setSpecName(e.target.value)}>
+              <select
+                value={specName}
+                onChange={(e) => setSpecName(e.target.value)}
+                disabled={customSpec !== null}
+              >
                 {specs.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -216,11 +244,14 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
               accept={ACCEPT}
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
-            <button type="submit" disabled={!file || submitting}>
+            <button type="submit" disabled={!file || submitting || customSpec !== null}>
               排版上传文件
             </button>
           </div>
-          <p className="hint">支持 txt / md / docx（GBK 编码的记事本文件也可），docx 自动提取正文。</p>
+          <p className="hint">
+            支持 txt / md / docx（GBK 编码的记事本文件也可），docx 自动提取正文。
+            {customSpec && '一次性自定义规格仅适用于粘贴文本，上传文件请改用内置规格。'}
+          </p>
         </form>
       </section>
 

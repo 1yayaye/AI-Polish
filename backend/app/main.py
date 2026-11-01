@@ -23,6 +23,7 @@ from app.optimization import router as optimization_router
 from app.stream import router as stream_router
 from app.word_jobs import router as word_jobs_router
 from app.word_preprocess import router as word_preprocess_router
+from app.word_specs import router as word_specs_router
 from app.word_stream import router as word_stream_router
 from app.word_worker import WordJobWorker
 from app.worker import PipelineWorker
@@ -99,6 +100,7 @@ app.include_router(export_router)
 app.include_router(stream_router)
 app.include_router(word_jobs_router)
 app.include_router(word_preprocess_router)
+app.include_router(word_specs_router)
 app.include_router(word_stream_router)
 
 

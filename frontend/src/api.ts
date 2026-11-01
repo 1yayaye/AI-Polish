@@ -174,11 +174,13 @@ export interface JobStreamState {
   output_filename: string | null
 }
 
-/** 排版选项（CompileOptions 的页面形态；自定义规格 JSON 归规格生成页 #36）。
- *  预处理送来的文本带 wf:type 结构标记，必须按 marked 输入渲染。 */
+/** 排版选项（CompileOptions 的页面形态；自定义规格 JSON 来自规格生成页 #36，
+ *  服务端先校验再创建——坏规格 422 挡在预留之前）。预处理送来的文本带
+ *  wf:type 结构标记，必须按 marked 输入渲染。 */
 export interface FormatOptions {
   input_format?: 'auto' | 'markdown' | 'plaintext' | 'marked'
   spec_name?: string
+  custom_spec?: Record<string, unknown>
   include_cover?: boolean
   include_toc?: boolean
   toc_title?: string
@@ -307,6 +309,79 @@ export function downloadJobOutput(
   filename: string,
 ): Promise<void> {
   return downloadBlob(`/api/word-formatter/jobs/${jobId}/download`, cardKey, filename)
+}
+
+// ---- 排版规格（backend/app/word_specs.py 的端点，issue #36） ----
+
+/** AI 生成响应：spec_json 是规格 JSON 全文（保存与送格式化的直接输入）。 */
+export interface GeneratedSpec {
+  success: boolean
+  spec_json: string
+  spec_name: string
+}
+
+/** 已存规格（SavedSpecOut）：spec_json 全文回传，编辑复用零转换。 */
+export interface SavedSpecView {
+  id: number
+  name: string
+  description: string | null
+  spec_json: string
+  created_at: string
+  updated_at: string
+}
+
+/** AI 同步生成排版规格（预留 1 次，失败服务端自动退回；未配置 503）。 */
+export function generateSpec(
+  cardKey: string,
+  requirements: string,
+): Promise<GeneratedSpec> {
+  return fetchJson<GeneratedSpec>('/api/word-formatter/specs/generate', cardKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requirements }),
+  })
+}
+
+/** 规格合法性校验：合法返回 valid 与规格名；坏 JSON / 非法规格 400
+ *  （ApiError 携带 detail）。 */
+export function validateSpec(
+  cardKey: string,
+  specJson: string,
+): Promise<{ valid: boolean; spec_name: string }> {
+  return fetchJson<{ valid: boolean; spec_name: string }>(
+    '/api/word-formatter/specs/validate',
+    cardKey,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spec_json: specJson }),
+    },
+  )
+}
+
+/** 保存为本人常用规格：同名覆盖（更新而非新建），坏规格 400 挡在写入前。 */
+export function saveSpec(
+  cardKey: string,
+  name: string,
+  specJson: string,
+  description?: string,
+): Promise<SavedSpecView> {
+  return fetchJson<SavedSpecView>('/api/word-formatter/specs/save', cardKey, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, spec_json: specJson, description: description ?? null }),
+  })
+}
+
+/** 本人全部已存规格（最近更新在前）。 */
+export function listSavedSpecs(cardKey: string): Promise<SavedSpecView[]> {
+  return fetchJson<SavedSpecView[]>('/api/word-formatter/specs/saved', cardKey)
+}
+
+export function deleteSavedSpec(cardKey: string, specId: number): Promise<void> {
+  return fetchJson<void>(`/api/word-formatter/specs/saved/${specId}`, cardKey, {
+    method: 'DELETE',
+  })
 }
 
 export const MODE_LABELS: Record<string, string> = {
