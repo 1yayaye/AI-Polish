@@ -21,6 +21,9 @@ pip-audit-cache2/
 .env
 .env.local
 
+# Local-only server credentials / ops notes (never commit)
+OPS-LOCAL.md
+
 # Local agent/tool state
 .claude/
 .roo/

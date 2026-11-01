@@ -110,3 +110,11 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 续期由 certbot 的 systemd timer 自动完成（webroot 路径在签发时已记入续期配置）；为让新证书即时生效，启用 443 后执行 `sudo certbot renew --deploy-hook "systemctl reload nginx"` 把 reload 挂进续期流程。
+
+## 8. 生产实例拓扑（Cloudflare 回源变体）
+
+当前生产实例不使用上面的 certbot 路线：域名解析在 Cloudflare（橙云），回源 HTTP:9800，源站 nginx 只监听 9800（静态 + `/api` 反代），HTTPS 由 Cloudflare 边缘终结——决策与"勿修复"事项见 [ADR-0006](./adr/0006-cloudflare-origin-port-9800.md)。
+
+- 站点配置变体：`deploy/nginx/ai-polish-cloudflare.conf`；**每次执行 deploy.sh 后必须重新套用它**（deploy.sh 会覆盖站点文件为 80/443 直连变体）
+- 日常运维（服务操作、配置项、发版、回滚、账本对账）见 [operations.md](./operations.md)
+- 服务器真实地址与凭据只存本地 `OPS-LOCAL.md`（gitignored），不入公开仓库
