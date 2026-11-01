@@ -403,6 +403,37 @@ def test_snapshot_change_is_rejected(db_engine: Engine, legacy_engine: Engine):
     assert _new_tables_count(db_engine, "users") == 1
 
 
+def test_same_counts_edited_money_is_rejected(db_engine: Engine, legacy_engine: Engine):
+    """同条数、只改金额的旧库快照（行数/max id 指纹识别不出的那种）对已
+    迁移新库重跑：同样中止交人裁决，而不是静默幂等跳过、拿新库旧数据
+    出一份"全部通过"的对账报告（issue #11 实测过的守卫实穿）。"""
+    with legacy_engine.begin() as conn:
+        user_id = _add_legacy_user(conn, "legacy-card-a", balance=5000)
+        _add_legacy_tx(conn, user_id, "admin_adjustment", 5000, 5000)
+    migrate_legacy_db(legacy_engine, db_engine)
+
+    # 快照被重导/篡改：条数与 max id 不变，金额整体 5000 → 4999
+    with legacy_engine.begin() as conn:
+        conn.exec_driver_sql(
+            "UPDATE users SET workspace_balance_cents = 4999 WHERE id = ?", (user_id,)
+        )
+        conn.exec_driver_sql(
+            "UPDATE billing_transactions SET amount_cents = 4999, balance_after_cents = 4999"
+        )
+
+    with pytest.raises(MigrationError, match="快照"):
+        migrate_legacy_db(legacy_engine, db_engine)
+
+    # 新库仍是第一次迁移进来的数据，未被第二个快照碰过
+    assert _new_tables_count(db_engine, "users") == 1
+    session = _new_session_factory(db_engine)()
+    try:
+        assert session.query(User).one().balance_fen == 5000
+        assert session.query(LedgerEntry).one().amount_fen == 5000
+    finally:
+        session.close()
+
+
 def test_cli_failure_exit_code_and_stderr(db_engine: Engine, legacy_engine: Engine, tmp_path: Path, capsys):
     with legacy_engine.begin() as conn:
         user_id = _add_legacy_user(conn, "legacy-card-drift", balance=5000)

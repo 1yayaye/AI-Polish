@@ -31,8 +31,11 @@
   不相交。
 - **幂等**：状态记在新库 ``migration_state`` 表（旧库快照指纹 + 迁移时间，
   本脚本私有，应用代码不读）。重跑时指纹一致则跳过写入（退出码 0，仍做
-  一次对账复核）；指纹不一致说明换了一份旧库快照，中止由人裁决。失败
-  回滚不留痕迹，重跑即从头开始。
+  一次对账复核）；指纹不一致说明换了一份旧库快照，中止由人裁决。指纹
+  含全部待迁行的内容摘要（SHA-256）：同条数、改金额的快照同样算"换了
+  一份"，不会被行数/max id 蒙混过关。指纹格式变更后，旧格式标记一律视
+  为不一致中止——一次性迁移，交人裁决即可。失败回滚不留痕迹，重跑即
+  从头开始。
 
 ## 用法
 
@@ -49,6 +52,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass, field
@@ -77,6 +81,14 @@ _REASON_MAX = 200  # ledger_entries.reason 的列宽
 _MISSING_REASON = "迁移自旧账本（{legacy_type}）"
 
 _LEGACY_TABLES = ("users", "billing_transactions", "custom_prompts", "saved_specs")
+
+# 旧表名 → _read_legacy 读出的数据键
+_DATA_KEY_BY_TABLE = {
+    "users": "users",
+    "billing_transactions": "transactions",
+    "custom_prompts": "prompts",
+    "saved_specs": "specs",
+}
 
 
 class MigrationError(Exception):
@@ -117,16 +129,28 @@ def _legacy_tables(old_engine: Engine) -> dict:
     return tables
 
 
-def _fingerprint(old_engine: Engine, tables: dict) -> str:
-    """旧库快照指纹：各表行数 + 最大 id，足够识别"是同一份快照"这件事。"""
-    with old_engine.connect() as conn:
-        parts = []
-        for name in _LEGACY_TABLES:
-            table = tables[name]
-            count = conn.execute(select(func.count()).select_from(table)).scalar_one()
-            max_id = conn.execute(select(func.max(table.c.id))).scalar_one()
-            parts.append(f"{name}={count}/{max_id}")
-    return ";".join(parts)
+def _fingerprint(data: dict) -> str:
+    """旧库快照指纹：各表行数 + 最大 id（人读）+ 待迁行内容 SHA-256（判定）。
+
+    行数/max id 识别不出同条数、改金额的快照——那种快照曾实测静默幂等
+    跳过并对新库旧数据出对账报告（issue #11），故"同一份快照"的判定落在
+    全部待迁行的规范化内容摘要上。指纹基于 _read_legacy 读出的数据：
+    is_system 行本就不迁，不参与；datetime 等值经 default=str 规范化。
+    """
+    parts = []
+    digest = hashlib.sha256()
+    for table_name in _LEGACY_TABLES:
+        rows = data[_DATA_KEY_BY_TABLE[table_name]]
+        parts.append(f"{table_name}={len(rows)}/{max((row['id'] for row in rows), default=0)}")
+        digest.update(
+            json.dumps(
+                [dict(row) for row in rows],
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        )
+    return ";".join(parts) + ":" + digest.hexdigest()
 
 
 def _read_legacy(old_engine: Engine, tables: dict) -> dict:
@@ -292,7 +316,7 @@ def migrate_legacy_db(old_engine: Engine, new_engine: Engine) -> MigrationReport
     tables = _legacy_tables(old_engine)
     data = _read_legacy(old_engine, tables)
     _validate_snapshot(data)
-    fingerprint = _fingerprint(old_engine, tables)
+    fingerprint = _fingerprint(data)
 
     with new_engine.begin() as conn:
         conn.exec_driver_sql(
