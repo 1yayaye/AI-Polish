@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
   ApiError,
   MODE_LABELS,
@@ -9,10 +9,8 @@ import {
   downloadExport,
   formatYuan,
   getChanges,
-  getQuota,
   listSessions,
   type ChangeEntry,
-  type Quota,
   type SessionView,
 } from './api'
 import { useSessionStream } from './useSessionStream'
@@ -20,6 +18,7 @@ import { useSessionStream } from './useSessionStream'
 /**
  * 工作台页（issue #19）：提交（模式选择/文本框）→ 逐段进度实时显示（SSE）
  * → 完成 → 导出入口；每段完成前后对照（变更记录）可查。
+ * 余额/剩余次数在用户外壳头部展示（App 的 refreshQuota 在预扣费/退款后刷新）。
  */
 
 const MODE_OPTIONS = ['paper_polish', 'paper_enhance', 'paper_polish_enhance'] as const
@@ -32,12 +31,10 @@ const SEGMENT_STATUS_LABELS: Record<string, string> = {
 
 interface Props {
   cardKey: string
-  quota: Quota
-  onQuotaChange: (quota: Quota) => void
-  onExit: () => void
+  refreshQuota: () => Promise<void>
 }
 
-export default function Workspace({ cardKey, quota, onQuotaChange, onExit }: Props) {
+export default function Workspace({ cardKey, refreshQuota }: Props) {
   const [mode, setMode] = useState<string>('paper_polish_enhance')
   const [text, setText] = useState('')
   const [session, setSession] = useState<SessionView | null>(null)
@@ -62,14 +59,6 @@ export default function Workspace({ cardKey, quota, onQuotaChange, onExit }: Pro
       cancelled = true
     }
   }, [cardKey])
-
-  const refreshQuota = useCallback(async () => {
-    try {
-      onQuotaChange(await getQuota(cardKey))
-    } catch {
-      // 额度刷新失败不打断主流程（下次操作会再试）
-    }
-  }, [cardKey, onQuotaChange])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -104,20 +93,6 @@ export default function Workspace({ cardKey, quota, onQuotaChange, onExit }: Pro
 
   return (
     <main className="workspace">
-      <header className="workspace-header">
-        <div className="quota">
-          <span className="quota-item">
-            余额 <strong>¥{formatYuan(quota.balance_fen)}</strong>
-          </span>
-          <span className="quota-item">
-            剩余次数 <strong>{quota.usage_remaining}</strong>
-          </span>
-        </div>
-        <button type="button" className="link-button" onClick={onExit}>
-          退出
-        </button>
-      </header>
-
       <section className="panel">
         <h2>提交润色任务</h2>
         <form onSubmit={handleSubmit}>

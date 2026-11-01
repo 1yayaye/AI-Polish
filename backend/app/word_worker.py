@@ -39,7 +39,7 @@ from typing import Protocol
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app import word_jobs
+from app import word_jobs, word_stream
 from app.db import short_tx
 from app.models import FormatJob
 from app.word_formatter import (
@@ -154,8 +154,12 @@ class WordJobWorker:
                 ).rowcount
                 == 1
             )
-            # 守卫失败 = 并发落定抢先：本 Worker 不碰它
-            return row.id if claimed else None
+            job_id = row.id
+        # 守卫失败 = 并发落定抢先：本 Worker 不碰它。短事务已提交才通知
+        # 进度流（app.word_stream）：唤醒后重读库，通知丢了也不丢状态
+        if claimed:
+            word_stream.notify(job_id)
+        return job_id if claimed else None
 
     def _job_input(self, job_id: int) -> tuple[str, dict | None, str | None]:
         """编译输入（文本、options、原文件名）：只读短事务，编译前提交关闭。"""
@@ -164,7 +168,7 @@ class WordJobWorker:
             return job.input_text, job.options, job.input_file_name
 
     def _write_progress(self, job_id: int, *, progress: float, message: str) -> None:
-        """进度三列短事务推进（展示态，不参与状态机）。"""
+        """进度三列短事务推进（展示态，不参与状态机），提交后叫醒进度流。"""
         with short_tx(self._session_factory) as session:
             session.execute(
                 update(FormatJob)
@@ -175,6 +179,7 @@ class WordJobWorker:
                     updated_at=func.current_timestamp(),
                 )
             )
+        word_stream.notify(job_id)
 
     async def _process(self, job_id: int) -> None:
         """单任务全流程：读输入 →（零事务）单并发编译+落盘 → 终态短事务。"""
@@ -231,6 +236,7 @@ class WordJobWorker:
                     updated_at=func.current_timestamp(),
                 )
             )
+        word_stream.notify(job_id)
 
     def _fail(self, job_id: int, reason: str) -> None:
         """失败收场：running → failed + 释放预留次数，同一短事务。
@@ -244,3 +250,6 @@ class WordJobWorker:
                 from_statuses=(word_jobs.JOB_RUNNING,),
                 reason=reason,
             )
+        # 归属输掉（对方已落终态）时本次提交零变更，通知后重读库无新事件，
+        # 多叫醒一次无害
+        word_stream.notify(job_id)

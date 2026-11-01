@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select, update
@@ -43,6 +43,7 @@ from app.models import FormatJob, User
 from app.recovery import RecoveryReport
 from app.word_formatter.models.stylespec import StyleSpec
 from app.word_formatter.services import builtin_specs
+from app.word_services import extract_text_from_docx
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,20 @@ def output_filename_for(job_id: int, input_file_name: str | None) -> str:
 
 
 def create_format_job(
-    session: Session, user: User, *, job_type: str, text: str, options: dict | None
+    session: Session,
+    user: User,
+    *,
+    job_type: str,
+    text: str,
+    options: dict | None,
+    input_file_name: str | None = None,
 ) -> FormatJob:
     """创建任务：落库 queued → 同事务经计费服务预留 1 次（GLOSSARY：用量上限）。
 
     账本 usage_reserve 行的 task_id 追溯到本任务（先 flush 拿主键）。次数
     不足抛 :class:`billing.InsufficientUsage`（路由映射 403）——任务行与预留
-    同事务，调用方（get_session）回滚即零副作用。
+    同事务，调用方（get_session）回滚即零副作用。input_file_name 是上传文件
+    的原名（交付文件名由 :func:`output_filename_for` 由此推导）。
     """
     job = FormatJob(
         user_id=user.id,
@@ -120,6 +128,7 @@ def create_format_job(
         status=JOB_QUEUED,
         input_text=text,
         options=options,
+        input_file_name=input_file_name,
     )
     session.add(job)
     session.flush()
@@ -258,6 +267,32 @@ def recover_interrupted(
 
 InputFormatName = Literal["auto", "markdown", "plaintext", "marked"]
 
+# 上传可解码为排版输入的扩展名 → input_format（.md 显式按 Markdown，其余交给
+# 渲染库的 auto 探测；docx 提取出的正文同样走探测）
+_UPLOAD_FORMATS = {"txt": "auto", "md": "markdown", "docx": "auto"}
+
+
+def _validated_text(text: str) -> str:
+    """排版文本统一校验：非空 + 长度上限（独立于会话的 5 万上限，排版对象是
+    整篇文档）。运行时读取 settings（改配置 = 改 .env + 重启，测试可
+    monkeypatch）；粘贴路径经 pydantic 校验器映射 422，上传路径由路由映射。"""
+    if not text.strip():
+        raise ValueError("文本不能为空")
+    limit = settings.max_word_text_chars
+    if len(text) > limit:
+        raise ValueError(f"文本长度 {len(text)} 超过上限 {limit} 字符")
+    return text
+
+
+def _decode_uploaded_text(content: bytes) -> str:
+    """上传文本解码：UTF-8 优先，失败回落 GBK（Windows 记事本默认编码，
+    spec #31 用户故事 3）。两者皆非的字节按 GBK 带替换符解出——宁可出现
+    占位符也不让一次上传 500，由后续空文本/长度校验兜底。"""
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("gbk", errors="replace")
+
 
 class FormatTextRequest(BaseModel):
     """文本格式化请求：渲染库 CompileOptions 的 HTTP 形态（custom_spec 为
@@ -279,12 +314,7 @@ class FormatTextRequest(BaseModel):
         运行时读取 settings（改配置 = 改 .env + 重启，测试可 monkeypatch）；
         超限 ValidationError 由 FastAPI 映射 422。
         """
-        if not value.strip():
-            raise ValueError("文本不能为空")
-        limit = settings.max_word_text_chars
-        if len(value) > limit:
-            raise ValueError(f"文本长度 {len(value)} 超过上限 {limit} 字符")
-        return value
+        return _validated_text(value)
 
 
 def _validated_custom_spec(spec: dict | None) -> dict | None:
@@ -363,6 +393,68 @@ def create_format_text_job(
     try:
         job = create_format_job(
             session, user, job_type=JOB_FORMAT, text=request.text, options=options
+        )
+    except billing.InsufficientUsage as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    return _job_out(job)
+
+
+@router.post("/format/file", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+async def create_format_file_job(
+    file: UploadFile,
+    spec_name: str | None = Form(None),
+    include_cover: bool = Form(True),
+    include_toc: bool = Form(True),
+    toc_title: str = Form("目 录"),
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> JobOut:
+    """上传文件创建格式化任务：解码/提文本（422）→ 预留次数（403）→ queued。
+
+    解码与提文本是本端点的内部职责，调用方只交文件：txt/md 按 UTF-8 优先
+    GBK 回落解码（:func:`_decode_uploaded_text`），docx 走 M4-T1 提文本工具，
+    input_format 由扩展名推导（.md 显式 Markdown，其余交给渲染库 auto 探测）。
+    原文件名随任务保留，交付文件名由 :func:`output_filename_for` 推导
+    （原名_formatted.docx）。上传字节数护栏归 M4-T7 收尾票（spec #31）。
+    """
+    file_name = file.filename or ""
+    suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    input_format = _UPLOAD_FORMATS.get(suffix)
+    if input_format is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail="仅支持 txt/md/docx 文件"
+        )
+    content = await file.read()
+    if suffix == "docx":
+        try:
+            text = extract_text_from_docx(content)
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="无法读取 docx 文件，请确认文件未损坏",
+            ) from exc
+    else:
+        text = _decode_uploaded_text(content)
+    try:
+        text = _validated_text(text)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    options = {
+        "input_format": input_format,
+        "spec_name": spec_name,
+        "custom_spec": None,
+        "include_cover": include_cover,
+        "include_toc": include_toc,
+        "toc_title": toc_title,
+    }
+    try:
+        job = create_format_job(
+            session,
+            user,
+            job_type=JOB_FORMAT,
+            text=text,
+            options=options,
+            input_file_name=file_name,
         )
     except billing.InsufficientUsage as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc

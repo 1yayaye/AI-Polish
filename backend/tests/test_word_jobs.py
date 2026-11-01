@@ -17,6 +17,7 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 from docx import Document
@@ -610,6 +611,139 @@ def test_lifespan_recovers_word_jobs_and_starts_worker(
     row = _job_row(db_session_factory, job_id)
     assert row.status == "queued" and row.attempt_count == 1  # 启动恢复已执行
     assert len(constructed) == 1  # 任务 Worker 已挂载
+
+
+# ---- POST /format/file：上传解码（UTF-8/GBK 回落）与 docx 提文本（issue #34） ----
+
+
+def test_file_upload_decodes_txt_and_gbk_fallback(
+    client: TestClient,
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+) -> None:
+    """txt 上传按 UTF-8 解码；GBK（Windows 记事本默认编码）回落解码不乱码；
+    原文件名随任务保留，选项字段进入 options JSON。"""
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("论文.txt", "第一段正文。\n\n第二段正文。".encode("utf-8"), "text/plain")},
+        data={"spec_name": "通用论文（无缩进）", "include_cover": "false"},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["input_file_name"] == "论文.txt"
+    job = _job_row(db_session_factory, body["id"])
+    assert job.input_text == "第一段正文。\n\n第二段正文。"
+    assert job.options["spec_name"] == "通用论文（无缩进）"
+    assert job.options["include_cover"] is False
+    assert job.options["input_format"] == "auto"
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("记事本.txt", "中文正文内容".encode("gbk"), "text/plain")},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    job = _job_row(db_session_factory, response.json()["id"])
+    assert job.input_text == "中文正文内容"
+
+
+def test_file_upload_md_and_docx(
+    client: TestClient,
+    usage_user: Callable[..., User],
+    db_session_factory: sessionmaker,
+) -> None:
+    """.md 显式按 Markdown；.docx 走 M4-T1 提文本工具自动提取正文。"""
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("笔记.md", "# 标题\n\n正文段落。".encode("utf-8"), "text/markdown")},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    assert _job_row(db_session_factory, response.json()["id"]).options["input_format"] == "markdown"
+
+    buffer = io.BytesIO()
+    doc = Document()
+    doc.add_paragraph("docx 里的第一段")
+    doc.add_paragraph("docx 里的第二段")
+    doc.save(buffer)
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("毕业论文.docx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    job = _job_row(db_session_factory, response.json()["id"])
+    assert job.input_text == "docx 里的第一段\ndocx 里的第二段"
+    assert job.input_file_name == "毕业论文.docx"
+
+
+def test_file_upload_guards(
+    client: TestClient,
+    usage_user: Callable[..., User],
+) -> None:
+    """不支持的扩展名、损坏的 docx、空文本一律 422（挡在预留之前，零副作用）。"""
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("论文.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("损坏.docx", b"not a zip", "application/octet-stream")},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("空白.txt", b"   \n ", "text/plain")},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+    assert (
+        client.post(
+            "/api/word-formatter/format/file",
+            files={"file": ("论文.txt", "正文".encode("utf-8"), "text/plain")},
+        ).status_code
+        == 401
+    )
+
+
+def test_file_upload_output_filename_keeps_original_name(
+    client: TestClient,
+    usage_user: Callable[..., User],
+    word_output_dir: Path,
+    db_session_factory: sessionmaker,
+) -> None:
+    """交付文件名保留上传原文件名加后缀（spec #31 用户故事 5）。"""
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+    response = client.post(
+        "/api/word-formatter/format/file",
+        files={"file": ("毕业论文.txt", "正文段落。".encode("utf-8"), "text/plain")},
+        headers=headers,
+    )
+    job_id = response.json()["id"]
+
+    assert asyncio.run(WordJobWorker(db_session_factory).process_next()) is True
+
+    response = client.get(f"/api/word-formatter/jobs/{job_id}/download", headers=headers)
+    assert response.status_code == 200
+    # 非 ASCII 交付名走 RFC 5987 的 filename*=utf-8'' 形态
+    assert "毕业论文_formatted.docx" in unquote(response.headers["content-disposition"])
 
 
 # ---- GET /specs：内置规格列表（M4-T3 格式化页选择器数据源） ----
