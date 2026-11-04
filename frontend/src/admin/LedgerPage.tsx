@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
-import { App as AntApp, Button, Space, Table, Tag, Typography, type TableProps } from 'antd'
+import {
+  Alert,
+  App as AntApp,
+  Button,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  type TableProps,
+} from 'antd'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   AdminUnauthorized,
@@ -31,11 +40,26 @@ function AmountCell({ value }: { value: number }) {
   )
 }
 
+/** 深链里的用户 ID 非数字：不发起请求，给出可读的无效态。 */
+function InvalidUserLedgerView() {
+  const navigate = useNavigate()
+  return (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <Button onClick={() => navigate('/admin')}>返回用户列表</Button>
+      <Alert type="warning" showIcon message="无效的用户 ID" />
+    </Space>
+  )
+}
+
 export default function LedgerPage() {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const params = useParams()
-  const userId = params.userId !== undefined ? Number(params.userId) : null
+  // 与 SessionsPage 的路由参数同一纪律：非数字不进视图、不发请求
+  // （Number('abc') 会以 NaN 发请求、标题渲染「#NaN」）
+  const invalidUserId = params.userId !== undefined && !/^\d+$/.test(params.userId)
+  const userId =
+    !invalidUserId && params.userId !== undefined ? Number(params.userId) : null
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [data, setData] = useState<AdminLedgerPage | null>(null)
@@ -63,6 +87,11 @@ export default function LedgerPage() {
   useEffect(() => {
     void load(userId, page, pageSize)
   }, [load, userId, page, pageSize])
+
+  // 放在 hooks 之后：提前返回不能改变 hook 的调用序列
+  if (invalidUserId) {
+    return <InvalidUserLedgerView />
+  }
 
   const columns: TableProps<AdminLedgerEntry>['columns'] = []
   if (userId === null) {

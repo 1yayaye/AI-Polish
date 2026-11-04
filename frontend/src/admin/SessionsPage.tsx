@@ -369,10 +369,27 @@ function SessionDetailView({ sessionId }: { sessionId: number }) {
   )
 }
 
+/** 深链里的会话 ID 非数字：不发起请求，直接给出可读的无效态。 */
+function InvalidSessionView() {
+  const navigate = useNavigate()
+  return (
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <Button onClick={() => navigate('/admin/sessions')}>返回会话列表</Button>
+      <Alert type="warning" showIcon message="无效的会话 ID" />
+    </Space>
+  )
+}
+
 export default function SessionsPage() {
   const params = useParams()
   if (params.sessionId !== undefined) {
-    return <SessionDetailView sessionId={Number(params.sessionId)} />
+    // 深链参数手改成非数字时，Number() 会以 NaN 发请求、标题渲染「#NaN」；
+    // 与列表过滤参数同一纪律：非法值不进视图（见 SessionListView 的 user_id）
+    return /^\d+$/.test(params.sessionId) ? (
+      <SessionDetailView sessionId={Number(params.sessionId)} />
+    ) : (
+      <InvalidSessionView />
+    )
   }
   return <SessionListView />
 }
