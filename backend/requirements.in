@@ -1,5 +1,8 @@
 # 运行时依赖（直接依赖声明；锁定版本见 requirements.txt，勿手改）
 fastapi
+# word_jobs/word_preprocess 文件上传端点（/format/file 等）的 multipart 表单解析，
+# FastAPI 在路由装饰期即检查其存在
+python-multipart
 uvicorn
 pydantic-settings
 pyjwt
