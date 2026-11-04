@@ -93,17 +93,22 @@ export default function WordFormatterPage({ cardKey, refreshQuota }: Props) {
   }, [cardKey])
 
   // 流上的展示态合并进任务列表（三类事件载荷同形，整体替换对应行）。
+  // 载荷带 job_id：切换关注任务的重渲染里 streamJob 还是上一个任务的尾帧，
+  // 按 id 挡掉，避免旧任务状态短暂写进新任务行。
   useEffect(() => {
-    if (watchingId === null || !streamJob) return
+    if (watchingId === null || !streamJob || streamJob.job_id !== watchingId) return
     setJobs((prev) =>
       prev.map((j) => (j.id === watchingId ? { ...j, ...streamJob } : j)),
     )
   }, [watchingId, streamJob])
 
   // 失败退次后余额已变：刷新外壳头部的剩余次数（账本一致的页面呈现）。
+  // 同一理由按 job_id 守卫：切换瞬间旧任务的 failed 不触发无谓刷新。
   useEffect(() => {
-    if (streamJob?.status === 'failed') void refreshQuota()
-  }, [streamJob?.status, refreshQuota])
+    if (streamJob?.status === 'failed' && streamJob.job_id === watchingId) {
+      void refreshQuota()
+    }
+  }, [streamJob, watchingId, refreshQuota])
 
   async function handleTextSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()

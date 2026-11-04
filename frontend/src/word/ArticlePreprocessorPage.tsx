@@ -64,8 +64,10 @@ export default function ArticlePreprocessorPage({ cardKey, refreshQuota }: Props
   }, [cardKey])
 
   // 流上的展示态合并进任务列表（snapshot/progress/终态载荷同形）。
+  // 载荷带 job_id：切换关注任务的重渲染里 streamJob 还是上一个任务的尾帧，
+  // 按 id 挡掉——否则旧任务的 completed 会误触发新任务的结果请求（409）。
   useEffect(() => {
-    if (watchingId === null || !streamJob) return
+    if (watchingId === null || !streamJob || streamJob.job_id !== watchingId) return
     setJobs((prev) =>
       prev.map((j) => (j.id === watchingId ? { ...j, ...streamJob } : j)),
     )

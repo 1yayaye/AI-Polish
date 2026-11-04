@@ -9,6 +9,9 @@
   短事务，LLM 等待期间零数据库事务（认证不占请求会话，见
   :func:`app.auth.authenticate_card_key`）。LLM 接缝与预处理同形
   （``complete(messages)``，issue #32），测试经 FastAPI 依赖注入脚本化假客户端。
+  已知例外（已接受损失）：LLM 等待窗口内进程崩溃会使预留滞留——成功不落
+  任何标记，启动扫描无法区分"已成功消费"与"崩溃滞留"，不做自动退回；
+  客服排查见 docs/operations.md。
 - **规格校验与保存**：坏 JSON / 非法规格一律 400 挡在保存之前；保存按
   （用户, 名称）同名覆盖（与旧版语义一致——更新而非新建），规格 JSON 全文
   原样存 saved_specs.spec_json（格式归渲染库 StyleSpec 拥有，本表只存取
@@ -70,9 +73,10 @@ def get_spec_ai() -> SpecGeneratingAI:
 
 class GenerateSpecRequest(BaseModel):
     """AI 生成请求：自然语言排版要求（老版同款下限，过短的需求生成不出
-    可用规格）。"""
+    可用规格）。上限 1 万字符防滥用——requirements 直接进 LLM 提示词，
+    超长串等于放大每次生成的调用成本。"""
 
-    requirements: str = Field(min_length=10)
+    requirements: str = Field(min_length=10, max_length=10_000)
 
 
 async def _generate_spec_json(requirements: str, ai: SpecGeneratingAI) -> str:
@@ -142,15 +146,19 @@ def _spec_name(spec_json: str) -> str:
 
 
 class ValidateSpecRequest(BaseModel):
-    """规格校验请求：spec_json 是规格 JSON 全文（字符串形态，与保存一致）。"""
+    """规格校验请求：spec_json 是规格 JSON 全文（字符串形态，与保存一致，
+    同一 10 万字符上限——真实规格 2–10KB，上限挡住滥用字符串与其解析开销）。"""
 
-    spec_json: str
+    spec_json: str = Field(max_length=100_000)
 
 
 @router.post("/specs/validate")
-def validate_spec(request: ValidateSpecRequest) -> dict:
+def validate_spec(
+    request: ValidateSpecRequest, user: User = Depends(get_current_user)
+) -> dict:
     """校验规格 JSON：合法返回 valid 与规格名；坏 JSON 或非法规格 400
-    （detail 带原因，前端直接展示）。"""
+    （detail 带原因，前端直接展示）。与其他 word-formatter 端点一样要求
+    卡密（401）——校验本身无副作用，但认证一致性优先。"""
     try:
         spec = validate_custom_spec(request.spec_json)
     except ValueError as exc:
@@ -169,10 +177,12 @@ def spec_schema(user: User = Depends(get_current_user)) -> dict:
 
 class SaveSpecRequest(BaseModel):
     """保存请求：spec_json 先过渲染库校验再入库（坏规格挡在写入之前）；
-    名称/描述长度与 saved_specs 列宽一致（SQLite 不强制，这里挡住）。"""
+    名称/描述长度与 saved_specs 列宽一致（SQLite 不强制，这里挡住）；
+    spec_json 上限 10 万字符（真实规格 2–10KB）——字符串按原文入库并随
+    列表整行回传，无上限时单个用户可撑爆表与列表响应。"""
 
     name: str = Field(min_length=1, max_length=100)
-    spec_json: str
+    spec_json: str = Field(max_length=100_000)
     description: str | None = Field(default=None, max_length=500)
 
 

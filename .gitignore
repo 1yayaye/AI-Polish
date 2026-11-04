@@ -17,6 +17,11 @@ pip-audit-cache2/
 *.sqlite
 *.sqlite3
 
+# 运行时数据目录（SQLite 库与 Word Formatter 产物 docx 等；无前导斜杠，
+# 根目录与 backend/ 下的同名目录都匹配——用户文档绝不入仓）
+data/
+gui-test-screenshots/
+
 # Environment
 .env
 .env.local

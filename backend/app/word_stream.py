@@ -91,10 +91,12 @@ def notify(job_id: int) -> None:
 
 
 def _job_payload(job: FormatJob) -> dict:
-    """任务流状态的统一载荷（snapshot / progress / 终态同形）：进度列全量加
-    失败原因与交付文件名，前端一次合并即得完整展示态。分块两列只有预处理
-    任务在标记段有值，格式化任务恒 None。"""
+    """任务流状态的统一载荷（snapshot / progress / 终态同形）：任务 id 加
+    进度列全量加失败原因与交付文件名，前端一次合并即得完整展示态。job_id
+    让前端能挡掉"切换关注任务的重渲染瞬间，旧任务的尾帧载荷合并进新任务
+    行"的脏合并。分块两列只有预处理任务在标记段有值，格式化任务恒 None。"""
     return {
+        "job_id": job.id,
         "status": job.status,
         "phase": job.phase,
         "progress": job.progress,

@@ -164,6 +164,8 @@ export interface JobView {
  *  终态同形，前端一次合并即得完整展示态。chunk_index/chunk_total 只有预处理
  *  任务的标记段有值（第几块/共几块），格式化任务恒 null。 */
 export interface JobStreamState {
+  /** 载荷所属任务：页面据此挡掉切换关注任务瞬间旧任务的尾帧载荷。 */
+  job_id: number
   status: string
   phase: string | null
   progress: number | null

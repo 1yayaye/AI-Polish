@@ -208,6 +208,40 @@ def test_validate_accepts_good_spec_and_rejects_bad_json(
     assert bad_spec.status_code == 400
 
 
+def test_validate_requires_card_key(client: TestClient) -> None:
+    """校验端点与其他 word-formatter 端点同一认证纪律：无卡密 401。"""
+    resp = client.post(
+        "/api/word-formatter/specs/validate",
+        json={"spec_json": VALID_SPEC_JSON},
+    )
+    assert resp.status_code == 401
+
+
+def test_spec_json_capped_at_100k_chars(
+    client: TestClient,
+    usage_user: Callable[..., User],
+) -> None:
+    """spec_json 串上限（校验与保存同一上限）：超限 422，挡住字符串入库
+    与列表整行回传的膨胀；正常规格不受影响（见上方 200 的用例）。"""
+    user = usage_user()
+    headers = {"X-Card-Key": user.card_key}
+    oversized = "x" * 100_001
+
+    validate = client.post(
+        "/api/word-formatter/specs/validate",
+        json={"spec_json": oversized},
+        headers=headers,
+    )
+    assert validate.status_code == 422
+
+    save = client.post(
+        "/api/word-formatter/specs/save",
+        json={"name": "超限规格", "spec_json": oversized},
+        headers=headers,
+    )
+    assert save.status_code == 422
+
+
 # ---- 已存规格：校验后保存、同名覆盖、归属隔离、删除 ----
 
 

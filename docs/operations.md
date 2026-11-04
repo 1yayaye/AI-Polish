@@ -64,6 +64,17 @@ sudo systemctl daemon-reload && sudo systemctl start ai-polish
 - 服务器 IP / 密码 / 管理凭据不写入本仓库与本机 shell 历史
 - 内存 426MB + 1G swap（`/swapfile`，已入 fstab）：构建期可能短暂吃 swap，属预期
 - 业务监控以**账本对账**为准：`SUM(账本) == 每用户余额`；巡检对滞留 queued 只告警不退款（日志可见即需人工排查）
+- **已知不可自动恢复的资金路径——AI 规格生成**（M4）：`/specs/generate` 预留 1 次后调 LLM（10–60s），该窗口内进程崩溃会使预留滞留。成功不落任何标记，启动扫描无法区分"已成功消费"与"崩溃滞留"（会误退历史成功生成），故按**已接受损失**处理、不做自动退回（app.word_specs 模块 docstring 同源记录）。客诉排查：崩溃时刻后查该用户 NULL-task 的预留/退回行，无配对退回的 reserve 即滞留——
+
+  ```sql
+  SELECT id, kind, created_at, reason FROM ledger_entries
+  WHERE user_id = ? AND task_id IS NULL
+    AND kind IN ('usage_reserve', 'usage_release')
+    AND created_at >= '<崩溃时刻>'
+  ORDER BY id;
+  -- 有 reserve 无其后配对 release 即滞留；人工补偿走管理后台"调整次数额度 +1"
+  -- 并注明原因（净效果等同释放该预留）
+  ```
 
 ## 验收/排障日志查证（T7 速查）
 

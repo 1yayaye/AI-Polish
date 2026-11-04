@@ -21,7 +21,7 @@ export interface JobStream {
   job: JobStreamState | null
   /** 连接状态：open = 实时连接中；reconnecting = 断线重连中；closed = 已终态关流 */
   connection: 'open' | 'reconnecting' | 'closed'
-  /** 不可恢复的错误（如卡密无效 401）；重连类错误不会出现在这里 */
+  /** 不可恢复的错误（如卡密无效 401、任务已删除 404）；重连类错误不会出现在这里 */
   fatal: string | null
 }
 
@@ -61,6 +61,10 @@ export function useJobStream(cardKey: string, jobId: number | null): JobStream {
             async onopen(response) {
               if (response.status === 401) {
                 throw new FatalStreamError('卡密无效，请重新登录')
+              }
+              if (response.status === 404) {
+                // 任务已被删除（如另一标签页）或不存在：重连永远不可能成功
+                throw new FatalStreamError('任务已删除或不存在')
               }
               if (!response.ok) {
                 // 5xx 等临时故障：可重试

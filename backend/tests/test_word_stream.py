@@ -164,6 +164,7 @@ def test_stream_pushes_snapshot_then_progress_then_completed(
         progress = [e for e in tail if e.event == "progress"]
         assert [e.id for e in progress] == [101]
         assert progress[0].data == {
+            "job_id": job_id,  # 载荷带任务 id：前端据此挡掉切换任务的尾帧合并
             "status": "running",
             "phase": "compile",
             "progress": 0.1,
