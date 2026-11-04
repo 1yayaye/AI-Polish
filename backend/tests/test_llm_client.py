@@ -169,6 +169,62 @@ def test_polish_empty_output_is_a_content_error(response: object) -> None:
     assert len(completions.calls) == 1
 
 
+# ---- complete(messages)：通用对话接缝（issue #32）——纪律与 polish 同一套 ----
+
+
+def test_complete_retries_transient_errors_with_backoff_then_succeeds(
+    instant_backoff: list[float],
+) -> None:
+    outcome = openai.RateLimitError("429", response=httpx.Response(429, request=_request()), body=None)
+    client, completions = _client_with([outcome, outcome, _response("标记结果")])
+    messages = [
+        {"role": "system", "content": "系统提示词"},
+        {"role": "user", "content": "待标记段落"},
+    ]
+
+    result = asyncio.run(client.complete(messages))
+
+    assert result == "标记结果"
+    assert len(completions.calls) == 3  # 两次瞬时 + 一次成功
+    assert instant_backoff == [2.0, 4.0]
+    # messages 原样透传：分块上下文由调用方组装，客户端不拆不拼
+    assert completions.calls[0] == messages
+
+
+def test_complete_content_error_fails_immediately_without_retry(
+    instant_backoff: list[float],
+) -> None:
+    client, completions = _client_with([_status_error(openai.AuthenticationError, 401)])
+
+    with pytest.raises(LLMContentError):
+        asyncio.run(client.complete([{"role": "user", "content": "原文"}]))
+
+    assert len(completions.calls) == 1  # 内容性错误不重试
+    assert instant_backoff == []
+
+
+def test_complete_transient_error_raises_after_exhausting_retries(
+    instant_backoff: list[float],
+) -> None:
+    outcome = openai.InternalServerError("500", response=httpx.Response(500, request=_request()), body=None)
+    client, completions = _client_with([outcome, outcome, outcome])
+
+    with pytest.raises(LLMTransientError):
+        asyncio.run(client.complete([{"role": "user", "content": "原文"}]))
+
+    assert len(completions.calls) == 3
+    assert instant_backoff == [2.0, 4.0]
+
+
+def test_complete_empty_output_is_a_content_error(instant_backoff: list[float]) -> None:
+    client, completions = _client_with([_response("  ")])
+
+    with pytest.raises(LLMContentError):
+        asyncio.run(client.complete([{"role": "user", "content": "原文"}]))
+
+    assert len(completions.calls) == 1
+
+
 def test_from_settings_reads_env_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

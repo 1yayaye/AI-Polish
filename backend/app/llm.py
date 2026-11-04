@@ -1,9 +1,9 @@
-"""LLM 客户端：openai 兼容的润色调用边界（ADR-0005）。
+"""LLM 客户端：openai 兼容的 LLM 调用边界（ADR-0005）。
 
-调用方（Worker、测试假客户端的替换目标）只需要知道 :class:`PolishLLMClient`
-的 ``model_name`` 与 :meth:`PolishLLMClient.polish`——base_url/api_key/model
-全部来自 .env（ADR-0005，无数据库配置路径），SDK 细节与重试策略都藏在本
-模块内部：
+调用方（Worker、Word Formatter 服务层、测试假客户端的替换目标）只需要知道
+:class:`PolishLLMClient` 的 ``model_name`` 与 :meth:`PolishLLMClient.polish` /
+:meth:`PolishLLMClient.complete`——base_url/api_key/model 全部来自 .env
+（ADR-0005，无数据库配置路径），SDK 细节与重试策略都藏在本模块内部：
 
 - **错误分类**：瞬时错误（网络失败/超时、HTTP 408/409/429/5xx）按指数退避
   重试至多 ``_MAX_ATTEMPTS`` 次；内容性错误（其余 4xx：key 无效、请求不合法、
@@ -34,7 +34,7 @@ _TRANSIENT_STATUS_CODES = frozenset({408, 409, 429})
 
 
 class LLMError(Exception):
-    """润色调用失败基类。"""
+    """LLM 调用失败基类。"""
 
 
 class LLMTransientError(LLMError):
@@ -82,6 +82,9 @@ class PolishLLMClient:
 
     :meth:`polish` 是单段落调用：输入段落文本，返回润色后的文本。
     阶段差异（润色/增强）只体现在 system_prompt，由调用方给出。
+    :meth:`complete` 是通用对话调用：给定完整 messages 轮次，返回纯文本
+    ——润色之外的消费方（文章预处理的分块标记、AI 规格生成）共用这一接缝，
+    错误分类与退避纪律与润色同源（issue #32），测试用脚本化假客户端注入。
     """
 
     def __init__(self, client: AsyncOpenAI, model: str) -> None:
@@ -115,6 +118,16 @@ class PolishLLMClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ]
+        return await self.complete(messages)
+
+    async def complete(self, messages: list[dict[str, str]]) -> str:
+        """通用对话调用：给定完整 messages（system/user 轮次），返回模型
+        输出的纯文本。
+
+        错误与重试纪律与 :meth:`polish` 同一套（唯一归口，不在消费方各自
+        重复）：瞬时错误按退避重试，重试耗尽抛 :class:`LLMTransientError`；
+        内容性错误与空输出立即抛 :class:`LLMContentError`。
+        """
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 content = await self._complete_once(messages)

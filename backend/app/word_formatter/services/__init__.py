@@ -24,6 +24,7 @@ from .compiler import (
 from .fixer import apply_patch, build_patch_from_report, fix_docx
 from .renderer import RenderOptions, render_docx
 from .spec_generator import (
+    ai_generate_spec,
     builtin_specs,
     build_generic_spec,
     export_spec_to_json,
@@ -41,6 +42,7 @@ __all__ = [
     "identify_paragraph_type",
     "VALID_MARKER_TYPES",
     # Spec Generator
+    "ai_generate_spec",
     "build_generic_spec",
     "builtin_specs",
     "validate_custom_spec",

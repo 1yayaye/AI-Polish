@@ -34,14 +34,14 @@ def test_migration_up_down_up(db_url: str) -> None:
 def test_upgraded_schema_matches_models(db_url: str) -> None:
     """迁移后的表列与 app.models 定义一致，防止两边漂移。"""
     from app.db import create_db_engine
-    from app.models import LedgerEntry, User
+    from app.models import FormatJob, LedgerEntry, User
 
     alembic.command.upgrade(_alembic_config(db_url), "head")
     engine = create_db_engine(db_url)
     try:
         with engine.connect() as conn:
             inspector = inspect(conn)
-            for model in (User, LedgerEntry):
+            for model in (User, LedgerEntry, FormatJob):
                 columns = {c["name"] for c in inspector.get_columns(model.__tablename__)}
                 model_columns = {c.name for c in model.__table__.columns}
                 assert columns == model_columns

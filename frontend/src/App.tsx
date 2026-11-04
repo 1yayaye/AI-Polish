@@ -1,14 +1,20 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { Navigate, Route, Routes } from 'react-router-dom'
+import UserShell from './UserShell'
+import WordFormatterPage from './word/WordFormatterPage'
+import ArticlePreprocessorPage from './word/ArticlePreprocessorPage'
+import SpecGeneratorPage from './word/SpecGeneratorPage'
+import FormatCheckerPage from './word/FormatCheckerPage'
 import Workspace from './Workspace'
 import { ApiError, getQuota, type Quota } from './api'
 
 /**
  * 卡密输入页：输入卡密后经 X-Card-Key 请求头查询本人额度
  * （卡密只走请求头，绝不进 URL，也不落任何日志可控的位置）。
- * 验证通过进入工作台。
+ * 验证通过进入用户页外壳（工作台 + Word 排版各页，issue #34 的四页路由）。
  *
  * 卡密即凭据（GLOSSARY），持久化边界选 sessionStorage：刷新保留、
- * 标签页关闭即清除；挂载时静默验证残留卡密，有效则用户无感回到工作台。
+ * 标签页关闭即清除；挂载时静默验证残留卡密，有效则用户无感回到原页面。
  */
 
 const CARD_KEY_STORAGE = 'ai-polish.card-key'
@@ -44,6 +50,18 @@ export default function App() {
   const [quota, setQuota] = useState<Quota | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const userKey = cardKey.trim()
+
+  // 额度刷新：创建任务预扣费、任务失败退次后由各页调用，外壳头部与账本
+  // 保持一致；失败不打断主流程（下次操作会再试）
+  const refreshQuota = useCallback(async () => {
+    try {
+      setQuota(await getQuota(userKey))
+    } catch {
+      // 额度刷新失败不打断主流程（下次操作会再试）
+    }
+  }, [userKey])
 
   // 刷新恢复：sessionStorage 里有卡密就静默验证——成功直接进入工作台
   // （用户无感）；401 说明卡密已失效，清除后停留输入页；网络故障则
@@ -89,16 +107,32 @@ export default function App() {
 
   if (quota !== null) {
     return (
-      <Workspace
-        cardKey={cardKey.trim()}
+      <UserShell
         quota={quota}
-        onQuotaChange={setQuota}
         onExit={() => {
           clearStoredCardKey()
           setQuota(null)
           setCardKey('')
         }}
-      />
+      >
+        <Routes>
+          <Route index element={<Workspace cardKey={userKey} refreshQuota={refreshQuota} />} />
+          <Route
+            path="word"
+            element={<WordFormatterPage cardKey={userKey} refreshQuota={refreshQuota} />}
+          />
+          <Route
+            path="word/specs"
+            element={<SpecGeneratorPage cardKey={userKey} refreshQuota={refreshQuota} />}
+          />
+          <Route
+            path="word/preprocess"
+            element={<ArticlePreprocessorPage cardKey={userKey} refreshQuota={refreshQuota} />}
+          />
+          <Route path="word/check" element={<FormatCheckerPage cardKey={userKey} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </UserShell>
     )
   }
 

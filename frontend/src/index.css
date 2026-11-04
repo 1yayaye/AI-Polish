@@ -306,3 +306,139 @@ button:disabled {
   background: #fff;
   color: #2563eb;
 }
+
+/* ---- 用户页外壳（issue #34）：导航 + 额度头部，门控后的全部用户页共用 ---- */
+
+.user-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 14px 16px 0;
+}
+
+.user-nav {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.user-nav a {
+  color: #6b7280;
+  text-decoration: none;
+  padding: 4px 2px;
+  border-bottom: 2px solid transparent;
+}
+
+.user-nav a.active {
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+}
+
+.user-header .quota {
+  margin-left: auto;
+  display: flex;
+  gap: 16px;
+  color: #6b7280;
+}
+
+/* ---- Word 排版页（issue #34） ---- */
+
+.option-row {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  font-size: 0.95rem;
+}
+
+.option-row select {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.progress-track {
+  background: #eef0f3;
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  background: #2563eb;
+  height: 100%;
+  transition: width 0.3s;
+}
+
+.job-progress .meta {
+  margin-top: 8px;
+}
+
+.job-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.job-table th,
+.job-table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+.job-table th {
+  color: #6b7280;
+  font-weight: normal;
+}
+
+.job-actions {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+/* 排版规格页（issue #36）：已存规格表与规格预览（三视图共用容器） */
+.spec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.spec-table th,
+.spec-table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+.spec-table th {
+  color: #6b7280;
+  font-weight: normal;
+}
+
+.spec-preview {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.spec-preview pre {
+  margin: 0;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.spec-json-editor {
+  font-family: monospace;
+}
