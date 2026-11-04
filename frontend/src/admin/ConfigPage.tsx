@@ -1,9 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Alert, Card, Descriptions, Space, Spin, Tag, Typography } from 'antd'
 import {
-  AdminError,
   AdminUnauthorized,
   getAdminConfig,
+  isApiError,
   type AdminConfigView,
 } from './api'
 
@@ -17,10 +17,6 @@ import {
  * .env + 重启服务，后端不存在改配置的接口。401（会话过期）由 ./api 的
  * onUnauthorized 统一回登录表单，这里不处理。
  */
-
-function isApiError(err: unknown): err is AdminError {
-  return err instanceof AdminError
-}
 
 /** 敏感项统一展示为布尔标签：不出现任何值。 */
 function ConfiguredTag({ configured }: { configured: boolean }) {

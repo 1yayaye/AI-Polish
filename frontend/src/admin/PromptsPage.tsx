@@ -14,8 +14,10 @@ import {
   Typography,
 } from 'antd'
 import {
-  AdminError,
   AdminUnauthorized,
+  createPageChange,
+  formatTime,
+  isApiError,
   listPrompts,
   setSystemPromptDefault,
   updateSystemPromptContent,
@@ -40,14 +42,6 @@ const STAGE_LABELS: Record<string, string> = {
 
 function stageLabel(stage: string): string {
   return STAGE_LABELS[stage] ?? stage
-}
-
-function formatTime(value: string): string {
-  return new Date(value).toLocaleString()
-}
-
-function isApiError(err: unknown): err is AdminError {
-  return err instanceof AdminError
 }
 
 /** 系统行正文编辑：保存即落库，立即对后续会话生效。 */
@@ -190,15 +184,7 @@ export default function PromptsPage() {
           total: data?.total ?? 0,
           showSizeChanger: true,
           showTotal: (total) => `共 ${total} 条提示词`,
-          onChange: (nextPage, nextPageSize) => {
-            // 改页大小时回第 1 页：旧页码在新页大小下可能越界落空页
-            if (nextPageSize !== pageSize) {
-              setPage(1)
-              setPageSize(nextPageSize)
-            } else {
-              setPage(nextPage)
-            }
-          },
+          onChange: createPageChange(setPage, setPageSize, pageSize),
         }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 64 },

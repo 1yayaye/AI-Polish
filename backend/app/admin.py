@@ -759,29 +759,16 @@ def list_prompts(
         select(func.count()).select_from(CustomPrompt).where(where)
     ).scalar_one()
     rows = session.execute(
-        select(CustomPrompt, User.card_key)
-        .join(User, User.id == CustomPrompt.user_id, isouter=True)
+        select(CustomPrompt)
         .where(where)
         .order_by(CustomPrompt.stage, CustomPrompt.is_system.desc(), CustomPrompt.id)
         .offset((page - 1) * page_size)
         .limit(page_size)
-    ).all()
+    ).scalars().all()
+    # 行构造统一走 _prompt_view（编辑端点同源）；每行补查脱敏卡密在
+    # 单运营商、页长 ≤100 的规模下无可观开销，换来字段契约只有一份
     return AdminPromptPage(
-        items=[
-            AdminPrompt(
-                id=row.id,
-                user_id=row.user_id,
-                card_key=mask_card_key(card_key) if card_key is not None else None,
-                name=row.name,
-                stage=row.stage,
-                content=row.content,
-                is_default=row.is_default,
-                is_system=row.is_system,
-                is_active=row.is_active,
-                updated_at=row.updated_at,
-            )
-            for row, card_key in rows
-        ],
+        items=[_prompt_view(session, row) for row in rows],
         total=total,
         page=page,
         page_size=page_size,

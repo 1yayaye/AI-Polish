@@ -14,10 +14,11 @@ import {
 } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import {
-  AdminError,
   AdminUnauthorized,
+  createPageChange,
   adjustUserBalance,
   adjustUserUsage,
+  isApiError,
   issueCardKeys,
   listUsers,
   type AdminUser,
@@ -35,10 +36,6 @@ import {
  */
 
 type Track = 'balance' | 'usage'
-
-function isApiError(err: unknown): err is AdminError {
-  return err instanceof AdminError
-}
 
 /** 批量发卡表单。成功后把完整卡密交给父组件做一次性展示。 */
 function IssueCardsModal({
@@ -331,15 +328,7 @@ export default function UsersPage() {
           total: data?.total ?? 0,
           showSizeChanger: true,
           showTotal: (total) => `共 ${total} 位用户`,
-          onChange: (nextPage, nextPageSize) => {
-            // 改页大小时回第 1 页：旧页码在新页大小下可能越界落空页
-            if (nextPageSize !== pageSize) {
-              setPage(1)
-              setPageSize(nextPageSize)
-            } else {
-              setPage(nextPage)
-            }
-          },
+          onChange: createPageChange(setPage, setPageSize, pageSize),
         }}
         columns={[
           { title: 'ID', dataIndex: 'id', width: 72 },
@@ -383,8 +372,14 @@ export default function UsersPage() {
         onIssued={(keys) => {
           setIssueOpen(false)
           setIssued(keys)
-          setPage(1) // 新卡密在列表尾段，回第 1 页从最新状态开始看
-          void load(1, pageSize, query)
+          // 新卡密在列表尾段，回第 1 页从最新状态开始看。已在第 1 页时
+          // page 状态不变、effect 不会重跑，需显式 load；否则交给 setPage
+          // 触发的 effect，避免同一参数发两次请求。
+          if (page === 1) {
+            void load(1, pageSize, query)
+          } else {
+            setPage(1)
+          }
         }}
       />
       <IssuedKeysModal keys={issued} onClose={() => setIssued(null)} />
