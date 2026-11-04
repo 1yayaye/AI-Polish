@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { App as AntApp, Button, Space, Table, Tag, Typography, type TableProps } from 'antd'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-  AdminError,
   AdminUnauthorized,
+  createPageChange,
+  formatTime,
+  isApiError,
+  ledgerKindLabel,
   listRecentLedger,
   listUserLedger,
   type AdminLedgerEntry,
@@ -18,28 +21,6 @@ import {
  * 数据全部来自后端只读查询接口：页面不产生任何账本变动。
  * 401（会话过期）由 ./api 的 onUnauthorized 统一回登录表单，这里不处理。
  */
-
-const KIND_LABELS: Record<string, string> = {
-  issue: '发卡入账',
-  charge: '润色扣费',
-  refund: '退款',
-  adjust: '余额调整',
-  usage_reserve: '次数预留',
-  usage_release: '次数释放',
-  usage_adjust: '次数调整',
-}
-
-function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind
-}
-
-function formatTime(value: string): string {
-  return new Date(value).toLocaleString()
-}
-
-function isApiError(err: unknown): err is AdminError {
-  return err instanceof AdminError
-}
 
 /** 带符号金额：余额轨显示 +N/-N；次数轨变动金额恒为 0，显示 —。 */
 function AmountCell({ value }: { value: number }) {
@@ -92,7 +73,7 @@ export default function LedgerPage() {
       title: '类型',
       dataIndex: 'kind',
       width: 110,
-      render: (kind: string) => <Tag>{kindLabel(kind)}</Tag>,
+      render: (kind: string) => <Tag>{ledgerKindLabel(kind)}</Tag>,
     },
     {
       title: '金额（分）',
@@ -148,15 +129,7 @@ export default function LedgerPage() {
           total: data?.total ?? 0,
           showSizeChanger: true,
           showTotal: (total) => `共 ${total} 条流水`,
-          onChange: (nextPage, nextPageSize) => {
-            // 改页大小时回第 1 页：旧页码在新页大小下可能越界落空页
-            if (nextPageSize !== pageSize) {
-              setPage(1)
-              setPageSize(nextPageSize)
-            } else {
-              setPage(nextPage)
-            }
-          },
+          onChange: createPageChange(setPage, setPageSize, pageSize),
         }}
         columns={columns}
       />

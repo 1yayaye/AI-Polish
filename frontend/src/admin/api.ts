@@ -26,11 +26,65 @@ export class AdminUnauthorized extends AdminError {}
 
 async function parseError(response: Response): Promise<string> {
   try {
-    const body = (await response.json()) as { detail?: string }
-    return body.detail ?? `请求失败（HTTP ${response.status}）`
+    const body = (await response.json()) as { detail?: unknown }
+    // FastAPI 校验错误（422）的 detail 是对象数组；只有字符串 detail 才是
+    // 可读消息，其余形态一律退回状态码兜底，不把结构化数据塞进 UI。
+    return typeof body.detail === 'string' && body.detail
+      ? body.detail
+      : `请求失败（HTTP ${response.status}）`
   } catch {
     return `请求失败（HTTP ${response.status}）`
   }
+}
+
+/** 页面共用的错误判型：AdminError.message 即可读文案。 */
+export function isApiError(err: unknown): err is AdminError {
+  return err instanceof AdminError
+}
+
+/**
+ * 后端时间列（SQLite CURRENT_TIMESTAMP）是不带时区的 UTC 串：补 Z 让浏览
+ * 器按 UTC 解析、以本地时区展示——直接 new Date(value) 会偏差一个时区。
+ */
+export function formatTime(value: string): string {
+  return new Date(`${value}Z`).toLocaleString()
+}
+
+/**
+ * 分页 onChange 工厂：改页大小时回第 1 页（旧页码在新页大小下可能越界
+ * 落空页）。pageSize 传当前值；showTotal 文案由调用方自带。
+ */
+export function createPageChange(
+  setPage: (page: number) => void,
+  setPageSize: (size: number) => void,
+  pageSize: number,
+): (page: number, pageSize: number) => void {
+  return (nextPage, nextPageSize) => {
+    if (nextPageSize !== pageSize) {
+      setPage(1)
+      setPageSize(nextPageSize)
+    } else {
+      setPage(nextPage)
+    }
+  }
+}
+
+/**
+ * 账本 kind 展示词表（取值与后端计费服务一一对应）；kind 是账本概念，管理
+ * 端各页共用同一份标签，未知 kind 原样展示（向后兼容新取值）。
+ */
+const LEDGER_KIND_LABELS: Record<string, string> = {
+  issue: '发卡入账',
+  charge: '润色预扣',
+  refund: '退款',
+  adjust: '余额调整',
+  usage_reserve: '次数预留',
+  usage_release: '次数释放',
+  usage_adjust: '次数调整',
+}
+
+export function ledgerKindLabel(kind: string): string {
+  return LEDGER_KIND_LABELS[kind] ?? kind
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {

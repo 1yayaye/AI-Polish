@@ -14,9 +14,12 @@ import {
 } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
-  AdminError,
   AdminUnauthorized,
+  createPageChange,
+  formatTime,
   getAdminSessionDetail,
+  isApiError,
+  ledgerKindLabel,
   listSessions,
   type AdminSessionDetail,
   type AdminSessionLedgerRow,
@@ -72,14 +75,6 @@ const SEGMENT_STATUS_COLORS: Record<string, string> = {
 
 function modeLabel(mode: string): string {
   return MODE_LABELS[mode] ?? mode
-}
-
-function formatTime(value: string): string {
-  return new Date(value).toLocaleString()
-}
-
-function isApiError(err: unknown): err is AdminError {
-  return err instanceof AdminError
 }
 
 function StatusTag({ status }: { status: string }) {
@@ -210,15 +205,7 @@ function SessionListView() {
           total: data?.total ?? 0,
           showSizeChanger: true,
           showTotal: (total) => `共 ${total} 个会话`,
-          onChange: (nextPage, nextPageSize) => {
-            // 改页大小时回第 1 页：旧页码在新页大小下可能越界落空页
-            if (nextPageSize !== pageSize) {
-              setPage(1)
-              setPageSize(nextPageSize)
-            } else {
-              setPage(nextPage)
-            }
-          },
+          onChange: createPageChange(setPage, setPageSize, pageSize),
         }}
         columns={columns}
       />
@@ -242,11 +229,6 @@ const SEGMENT_COLUMNS: TableProps<AdminSegmentStatus>['columns'] = [
     ),
   },
 ]
-
-const LEDGER_KIND_LABELS: Record<string, string> = {
-  charge: '润色预扣',
-  refund: '退款',
-}
 
 /** 该会话的账本行：退款行出现在账本里即"退款已落账"。 */
 function SessionLedgerTable({ rows }: { rows: AdminSessionLedgerRow[] }) {
@@ -273,7 +255,7 @@ function SessionLedgerTable({ rows }: { rows: AdminSessionLedgerRow[] }) {
             width: 110,
             render: (kind: string) => (
               <Tag color={kind === 'refund' ? 'success' : 'processing'}>
-                {LEDGER_KIND_LABELS[kind] ?? kind}
+                {ledgerKindLabel(kind)}
               </Tag>
             ),
           },
