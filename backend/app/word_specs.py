@@ -62,7 +62,14 @@ class SpecGeneratingAI(Protocol):
 def get_spec_ai() -> SpecGeneratingAI:
     """AI 规格生成的 LLM 接缝（FastAPI 依赖）：生产按 .env 惰性构造
     :class:`app.llm.PolishLLMClient`；测试经 ``app.dependency_overrides``
-    注入脚本化假客户端（与 Worker 的 marking_ai 注入同一纪律）。"""
+    注入脚本化假客户端（与 Worker 的 marking_ai 注入同一纪律）。
+    未配置（ADR-0005）在这里映射为 503——依赖先于路由体解析，503 契约
+    （明确失败、零预留）只能由构造接缝自己兑现，路由体内的守卫到不了。"""
+    if not app_llm.is_configured():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="模型接入未配置，AI 规格生成暂不可用",
+        )
     from app.llm import PolishLLMClient
 
     return PolishLLMClient.from_settings()
@@ -93,15 +100,10 @@ async def generate_spec(
     card_key: Annotated[str | None, Header(alias=CARD_KEY_HEADER)] = None,
     ai: SpecGeneratingAI = Depends(get_spec_ai),
 ) -> dict:
-    """AI 同步生成排版规格：503（未配置，零预留）→ 401 → 403（次数不足）
-    → 预留 1 次 → LLM 生成（等待期间零数据库事务）→ 成功返回规格 JSON；
-    失败同额退回预留并以 502 收场。task_id 为空（无任务行，账本 reason
-    可追溯）。"""
-    if not app_llm.is_configured():
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="模型接入未配置，AI 规格生成暂不可用",
-        )
+    """AI 同步生成排版规格：503（未配置，零预留，见 get_spec_ai）→ 401
+    → 403（次数不足）→ 预留 1 次 → LLM 生成（等待期间零数据库事务）→
+    成功返回规格 JSON；失败同额退回预留并以 502 收场。task_id 为空
+    （无任务行，账本 reason 可追溯）。"""
     with short_tx(app_db.SessionLocal) as session:
         try:
             user = authenticate_card_key(session, card_key)

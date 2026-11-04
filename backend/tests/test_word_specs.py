@@ -117,21 +117,19 @@ def test_generate_is_503_without_model_config_with_zero_reserve(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: sessionmaker,
 ) -> None:
-    """模型接入未配置（ADR-0005）：503 明确失败，零预留零 LLM 调用。"""
+    """模型接入未配置（ADR-0005）：503 明确失败，零预留。
+
+    走真实 get_spec_ai 接缝（不注入假客户端）——503 由依赖在路由体之前
+    兑现，这是生产 500 事故（依赖构造先于路由守卫，守卫永远测不到该
+    路径）的回归测试。"""
     monkeypatch.setattr(settings, "llm_base_url", "")
-    llm = ScriptedMarkingLLM([VALID_SPEC_JSON])
-    app.dependency_overrides[word_specs.get_spec_ai] = lambda: llm
-    try:
-        user = usage_user(usage_limit=3)
-        response = client.post(
-            "/api/word-formatter/specs/generate",
-            json={"requirements": REQUIREMENTS},
-            headers={"X-Card-Key": user.card_key},
-        )
-    finally:
-        app.dependency_overrides.pop(word_specs.get_spec_ai, None)
+    user = usage_user(usage_limit=3)
+    response = client.post(
+        "/api/word-formatter/specs/generate",
+        json={"requirements": REQUIREMENTS},
+        headers={"X-Card-Key": user.card_key},
+    )
     assert response.status_code == 503, response.text
-    assert llm.calls == []
     session = db_session_factory()
     try:
         kinds = session.execute(select(LedgerEntry.kind)).scalars().all()
